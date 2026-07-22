@@ -29,12 +29,12 @@ Compared to the Falcon scheme, and to previous versions of this code,
 the following points are noteworthy:
 
   - Encoding rules (public keys, private keys, hash-to-point sampling)
-    has been harmonized to little-endian.
+    have been harmonized to little-endian.
 
   - Public keys are now in NTT format (original Falcon used plain format
     so as to leave room for alternate NTT implementations or for non-NTT
     computations, but in practice the usual "bit-reversal" NTT is just
-    too convenient and there is little point to using anything else).
+    too convenient and there is little point in using anything else).
 
   - Maximum infinity norm of signatures is now set to 840 (a suggestion
     from Yang Yu; it apparently helps with some security proofs), down
@@ -48,7 +48,7 @@ the following points are noteworthy:
 
   - A hash of the public key (using SHAKE256, with a 64-byte output) is
     included in the "mu" computation. This hash value is now part of the
-    private key storage format; which is thus enlarged by 64 bytes (it
+    private key storage format, which is thus enlarged by 64 bytes (it
     is conceptually possible to recompute the public key and then its
     hash from the other private key fields, but the interchange format
     for private keys must now include the hash).
@@ -61,7 +61,7 @@ the following points are noteworthy:
 
   - The base sampler (in the Gaussian sampling) now uses 79 bits of
     randomness instead of 72 (since an extra bit is needed for the sign,
-    the base sampler already used 10 byte from the PRNG, so this merely
+    the base sampler already used 10 bytes from the PRNG, so this merely
     uses the 7 extra bits instead of discarding them).
 
   - The "SHAKE256x4" optional support was removed (it provided only
@@ -72,11 +72,11 @@ the following points are noteworthy:
     2025/1239](https://eprint.iacr.org/2025/1239), making keygen a bit
     faster and reducing RAM usage.
 
-If I guessed right then this code *might* perfectly align with the future
-FIPS 206 and would then not need any further adjustment, but no such
-guarantee can be offered (in fact, the future FIPS 206 draft will be a
-*draft* precisely because extra modification might be included into the
-final FIPS 206).
+If I guessed right then this code *might* perfectly align with the
+future FIPS 206 and would then not need any further adjustment, but no
+such guarantee can be offered (in fact, the future FIPS 206 draft will
+be a *draft* precisely because extra modifications might be included
+into the final FIPS 206).
 
 This implementation is the C variant of the [Rust
 implementation](https://github.com/pornin/rust-fn-dsa/). It is
