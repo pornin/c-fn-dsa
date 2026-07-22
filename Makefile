@@ -4,11 +4,10 @@
 #   -DFNDSA_NEON=0         disable NEON support
 #   -DFNDSA_RV64D=0        disable use of floating-point hardware on RISC-V
 #
-#   -DFNDSA_NEON_SHA3=1    enable NEON optimizations for parallel SHAKE256
 #   -DFNDSA_DIV_EMU=1      force integer emulation of divisions (RISC-V only)
 #   -DFNDSA_SQRT_EMU=1     force integer emulation of square roots (RISC-V only)
 #
-#   -DFNDSA_SHAKE256X4=1   use four parallel SHAKE256 as internal PRNG
+#   -DFNDSA_TSC=1          use timestamp counter (for speed_fndsa benchmarks)
 #
 # AVX2 support is compiled on x86 and x86_64 but is gated at runtime
 # with a check that AVX2 is supported by the current CPU (and not
@@ -30,12 +29,6 @@
 # part of the 64-bit ARMv8 ABI, you normally don't have to fiddle with
 # that.
 #
-# An optional NEON-optimized SHAKE256 implementation can be enabled (it
-# runs two SHAKE256 implementations in parallel). It is disabled by default
-# because it turns out to be slower than the plain code on ARM Cortex-A55
-# and Cortex-A76 test systems. It _might_ be faster on some other ARM
-# systems. To enable it, use '-DFNDSA_NEON_SHA3=1'.
-#
 # On 64-bit RISC-V systems, the floating-point hardware is used if
 # detected at compile-time (i.e. the target architecture includes the 'D'
 # extension, which is part of the usual "RV64GC" package). When these
@@ -43,23 +36,25 @@
 # be done with only integer computations, which is slower but possibly
 # safer with regard to timing attacks.
 #
-# An internal PRNG is used during key pair generation (to generate
-# candidate (f,g) polynomial pairs) and during signature generation (to
-# power the Gaussian sampling). By default, that PRNG is a simple
-# SHAKE256. An alternate PRNG is enabled by setting
-# '-DFNDSA_SHAKE256X4=1': this new PRNG uses four SHAKE256 in parallel,
-# with interleaved outputs. The alternate PRNG speeds up signature
-# generation by about 20% when runing on an x86 CPU with AVX2 support;
-# however, it also increases stack usage by aout 1.1 kB, which can be a
-# problem on small embedded systems such as microcontrollers, which is
-# why it is not the default. Moreover, using the alternate PRNG
-# necessarily changes the keys and signatures obtained from a given seed
-# (note that reproducibility of keys and signatures should not be relied
-# upon, at least until the FN-DSA standard is finalized, as things are
-# expected to change again in some areas).
-#
-# By default, this code compiles 'test_fndsa' (a test framework to validate
-# that all computations are correct) and 'speed_fndsa' (speed benchmarks).
+# By default, this code compiles 'test_fndsa' (a test framework to
+# validate that all computations are correct) and 'speed_fndsa' (speed
+# benchmarks). The 'speed_fndsa' program uses the platform cycle
+# counter, which _may_ be inaccessible to normal user, unless some
+# specific action is performed. On x86 Linux systems (both 32-bit and
+# 64-bit), access to the cycle counter can be authorized by the root
+# user, by writing to a specific pseudofile in /sys. By adding
+# '-DFNDSA_TSC=1' to the compilation command for speed_fndsa.c, the
+# timestamp counter will be used instead, and that one is typically
+# accessible by default; however, the timestamp counter is not reliable
+# for benchmarks in general, unless CPU frequency opportunistic upward
+# scaling (aka "TurboBoost" in Intel terminology) has been disabled. On
+# aarch64 and riscv64 Linux systems, allowing access to the cycle
+# counter by userland applications is a more involved process which
+# entails loading a custom kernel module; see details on:
+#    https://github.com/pornin/cycle-counter/
+# It has been reported that the "Apple Silicon" CPUs (aarch64 but made
+# by Apple) behave differently, and the custom Linux kernel module above
+# will not work on these machines.
 
 CC = clang
 CFLAGS = -W -Wextra -Wundef -Wshadow -O2
@@ -72,7 +67,7 @@ OBJ_KGEN = kgen.o kgen_fxp.o kgen_gauss.o kgen_mp31.o kgen_ntru.o kgen_poly.o kg
 OBJ_SIGN = sign.o sign_core.o sign_fpoly.o sign_fpr.o sign_sampler.o
 OBJ_VRFY = vrfy.o
 OBJ = $(OBJ_COMM) $(OBJ_KGEN) $(OBJ_SIGN) $(OBJ_VRFY)
-TESTOBJ = test_fndsa.o test_sampler.o test_sign.o
+TESTOBJ = test_fndsa.o
 SPEEDOBJ = speed_fndsa.o
 
 all: test_fndsa speed_fndsa
@@ -144,12 +139,6 @@ vrfy.o: vrfy.c fndsa.h inner.h
 
 test_fndsa.o: test_fndsa.c fndsa.h inner.h kgen_inner.h sign_inner.h
 	$(CC) $(CFLAGS) -c -o test_fndsa.o test_fndsa.c
-
-test_sampler.o: test_sampler.c sign_sampler.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) -c -o test_sampler.o test_sampler.c
-
-test_sign.o: test_sign.c sign_sampler.c sign_core.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) -c -o test_sign.o test_sign.c
 
 speed_fndsa.o: speed_fndsa.c fndsa.h inner.h
 	$(CC) $(CFLAGS) -c -o speed_fndsa.o speed_fndsa.c

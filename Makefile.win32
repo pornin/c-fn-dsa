@@ -2,6 +2,12 @@
 # 'Visual Studio command-line' with:
 #    nmake /f Makefile.win32
 # See the Linux Makefile for details.
+# Note that on x86 machines, Windows typically prohibits access to performance
+# counter, so that the speed benchmark tool (speed_fndsa.exe) will not work,
+# unless you add the '/DFNDSA_TSC=1' command-line option to make it use the
+# timestamp counter, which is unreliable (see the Linux Makefile for details;
+# in a nutshell, you must disable TurboBoost first), but at least does not
+# crash.
 CC = cl
 CFLAGS = /nologo /W4 /O2
 LD = cl
@@ -13,7 +19,7 @@ OBJ_KGEN = kgen.obj kgen_fxp.obj kgen_gauss.obj kgen_mp31.obj kgen_ntru.obj kgen
 OBJ_SIGN = sign.obj sign_core.obj sign_fpoly.obj sign_fpr.obj sign_sampler.obj
 OBJ_VRFY = vrfy.obj
 OBJ = $(OBJ_COMM) $(OBJ_KGEN) $(OBJ_SIGN) $(OBJ_VRFY)
-TESTOBJ = test_fndsa.obj test_sampler.obj test_sign.obj
+TESTOBJ = test_fndsa.obj
 SPEEDOBJ = speed_fndsa.obj
 
 all: test_fndsa.exe speed_fndsa.exe
@@ -85,12 +91,6 @@ vrfy.obj: vrfy.c fndsa.h inner.h
 
 test_fndsa.obj: test_fndsa.c fndsa.h inner.h kgen_inner.h sign_inner.h
 	$(CC) $(CFLAGS) /c /Fo:test_fndsa.obj test_fndsa.c
-
-test_sampler.obj: test_sampler.c sign_sampler.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) /c /Fo:test_sampler.obj test_sampler.c
-
-test_sign.obj: test_sign.c sign_sampler.c sign_core.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) /c /Fo:test_sign.obj test_sign.c
 
 speed_fndsa.obj: speed_fndsa.c fndsa.h inner.h
 	$(CC) $(CFLAGS) /c /Fo:speed_fndsa.obj speed_fndsa.c

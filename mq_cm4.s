@@ -7,6 +7,7 @@
 	.equ	Q1I, 4143984639
 	.equ	R, 10952
 	.equ	R2, 5664
+	.equ	B_INF, 840
 
 @ =======================================================================
 @ void fndsa_mqpoly_small_to_int(unsigned logn, const int8_t *f, uint16_t *d)
@@ -326,16 +327,16 @@ fndsa_mqpoly_sqnorm_signed__L1:
 	.size	fndsa_mqpoly_sqnorm_signed,.-fndsa_mqpoly_sqnorm_signed
 
 @ =======================================================================
-@ uint32_t fndsa_mqpoly_sqnorm_int(unsigned logn, const uint16_t *a)
+@ uint32_t fndsa_mqpoly_sqnorm_binf_int(unsigned logn, const uint16_t *a)
 @ =======================================================================
 
 	.align	2
-	.global	fndsa_mqpoly_sqnorm_int
+	.global	fndsa_mqpoly_sqnorm_binf_int
 	.thumb
 	.thumb_func
-	.type	fndsa_mqpoly_sqnorm_int, %function
-fndsa_mqpoly_sqnorm_int:
-	push.w	{ r4, r5, r6, r7 }
+	.type	fndsa_mqpoly_sqnorm_binf_int, %function
+fndsa_mqpoly_sqnorm_binf_int:
+	push.w	{ r4, r5, r6, r7, lr }
 	movs	r3, #1
 	lsls	r3, r0
 
@@ -345,11 +346,14 @@ fndsa_mqpoly_sqnorm_int:
 	@ r6 <- ceil(q/2) (in both halves)
 	movw	r6, #((Q + 1) >> 1)
 	movt	r6, #((Q + 1) >> 1)
+	@ r12 <- B_INF (in both halves)
+	movw	r14, #B_INF
+	movt	r14, #B_INF
 
 	movw	r0, #0
 	@ We clear the Q flag, which we will use to detect overflows.
 	msr	APSR_nzcvq, r0
-fndsa_mqpoly_sqnorm_int__L1:
+fndsa_mqpoly_sqnorm_binf_int__L1:
 	@ We can use ldrd because the caller ensured that the input is
 	@ aligned.
 	ldrd	r2, r4, [r1], #8
@@ -365,17 +369,29 @@ fndsa_mqpoly_sqnorm_int__L1:
 	@ flag will be set.
 	smlad	r0, r2, r2, r0
 	smlad	r0, r4, r4, r0
+	@ Also check the L-infinity norm. For each signed value z (half of
+	@ r2 or r4), B_INF - z and B_INF + z must be non-negative. usat16
+	@ will set the Q flag whenever a signed value saturates (i.e. is
+	@ negative).
+	ssub16	r7, r14, r2
+	sadd16	r2, r14, r2
+	usat16	r7, #15, r7
+	usat16	r2, #15, r2
+	ssub16	r7, r14, r4
+	sadd16	r4, r14, r4
+	usat16	r7, #15, r7
+	usat16	r4, #15, r4
+
 	subs	r3, #4
-	bne	fndsa_mqpoly_sqnorm_int__L1
+	bne	fndsa_mqpoly_sqnorm_binf_int__L1
 
 	@ If the Q flag is set, saturate the returned value to 0xFFFFFFFF
 	mrs	r1, APSR
 	sbfx	r1, r1, #27, #1
 	orrs	r0, r1
 
-	pop	{ r4, r5, r6, r7 }
-	bx	lr
-	.size	fndsa_mqpoly_sqnorm_int,.-fndsa_mqpoly_sqnorm_int
+	pop	{ r4, r5, r6, r7, pc }
+	.size	fndsa_mqpoly_sqnorm_binf_int,.-fndsa_mqpoly_sqnorm_binf_int
 
 @ =======================================================================
 @ uint32_t fndsa_mqpoly_sqnorm_int_to_signed(unsigned logn, uint16_t *a)

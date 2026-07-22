@@ -26,7 +26,7 @@ OBJ_SIGN_ASM = sign_fpr_cm4.o sign_sampler_cm4.o
 OBJ_VRFY = vrfy.o
 OBJ_ASM = $(OBJ_COMM_ASM) $(OBJ_SIGN_ASM)
 OBJ = $(OBJ_COMM) $(OBJ_KGEN) $(OBJ_SIGN) $(OBJ_VRFY) $(OBJ_ASM)
-TESTOBJ = test_fndsa.o test_sampler.o test_sign.o
+TESTOBJ = test_fndsa.o
 
 all: test_fndsa
 
@@ -109,9 +109,3 @@ vrfy.o: vrfy.c fndsa.h inner.h
 
 test_fndsa.o: test_fndsa.c fndsa.h inner.h kgen_inner.h sign_inner.h
 	$(CC) $(CFLAGS) -c -o test_fndsa.o test_fndsa.c
-
-test_sampler.o: test_sampler.c sign_sampler.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) -c -o test_sampler.o test_sampler.c
-
-test_sign.o: test_sign.c sign_sampler.c sign_core.c fndsa.h sign_inner.h inner.h
-	$(CC) $(CFLAGS) -c -o test_sign.o test_sign.c

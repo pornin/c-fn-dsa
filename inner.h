@@ -251,6 +251,20 @@
 #define restrict
 #endif
 
+/* A macro to prevent inlining of a function. This is used in top-level
+   handling of operations, with intermediate degree-specific wrappers
+   that perform only the required stack allocation for that degree; this
+   makes sense only if the wrappers are not inlined. Inlining the
+   functions would still be correct, but suboptimal. The macro below
+   is a hint for the compiler. */
+#if defined __GNUC__ || defined __clang__
+#define NOINLINE   __attribute__ ((noinline))
+#elif defined _MSC_VER
+#define NOINLINE   __declspec(noinline)
+#else
+#define NOINLINE
+#endif
+
 /* ==================================================================== */
 /*
  * SHAKE implementation.
@@ -377,89 +391,6 @@ shake_next_u64(shake_context *sc)
 	return x;
 }
 
-/* By default, we use a simple SHAKE256 for internal PRNG needs
-   (in keygen to generate (f,g), in signing for the Gaussian sampling).
-   If FNDSA_SHAKE256X4 is non-zero, then SHAKE256x4 is used: it is a
-   PRNG consisting of four SHAKE256 running in parallel, with interleaved
-   outputs. This has two main effects:
-     - On x86 with AVX2 support, this makes signing faster (by about 20%).
-     - It increases stack usage by about 1.1 kB, which can be a concern
-       for small embedded systems (e.g. ARM Cortex-M4).
-   It otherwise has no real perceivable effect, except that (of course)
-   it changes the exact key pairs and signature values obtained from a
-   given seed. */
-#ifndef FNDSA_SHAKE256X4
-#define FNDSA_SHAKE256X4   0
-#endif
-
-#if FNDSA_SHAKE256X4
-/*
- * SHAKE256x4 is a PRNG based on SHAKE256; it runs four SHAKE256 instances
- * in parallel, interleaving their outputs with 64-bit granularity. The
- * four instances are initialized with a common seed, followed by a single
- * byte of value 0x00, 0x01, 0x02 or 0x03, depending on the SHAKE instance.
- */
-
-typedef struct {
-	uint64_t state[100];
-	uint8_t buf[4 * 136];
-	unsigned ptr;
-#if FNDSA_AVX2
-	int use_avx2;
-#endif
-} shake256x4_context;
-
-/* Initialize a SHAKE256x4 context from a given seed.
-   WARNING: seed length MUST NOT exceed 134 bytes. */
-#define shake256x4_init   fndsa_shake256x4_init
-void shake256x4_init(shake256x4_context *sc, const void *seed, size_t seed_len);
-/* Refill the SHAKE256x4 output buffer. */
-#define shake256x4_refill   fndsa_shake256x4_refill
-void shake256x4_refill(shake256x4_context *sc);
-
-/* Get the next byte of pseudorandom output. */
-static inline uint8_t
-shake256x4_next_u8(shake256x4_context *sc)
-{
-	if (sc->ptr >= sizeof sc->buf) {
-		shake256x4_refill(sc);
-	}
-	return sc->buf[sc->ptr ++];
-}
-
-/* Get the next 16-bit word of pseudorandom output. */
-static inline unsigned
-shake256x4_next_u16(shake256x4_context *sc)
-{
-	if (sc->ptr >= (sizeof sc->buf) - 1) {
-		shake256x4_refill(sc);
-	}
-	unsigned x = (unsigned)sc->buf[sc->ptr]
-		| ((unsigned)sc->buf[sc->ptr + 1] << 8);
-	sc->ptr += 2;
-	return x;
-}
-
-/* Get the next 64-bit word of pseudorandom output. */
-static inline uint64_t
-shake256x4_next_u64(shake256x4_context *sc)
-{
-	if (sc->ptr >= (sizeof sc->buf) - 7) {
-		shake256x4_refill(sc);
-	}
-	uint64_t x = (uint64_t)sc->buf[sc->ptr]
-		| ((uint64_t)sc->buf[sc->ptr + 1] << 8)
-		| ((uint64_t)sc->buf[sc->ptr + 2] << 16)
-		| ((uint64_t)sc->buf[sc->ptr + 3] << 24)
-		| ((uint64_t)sc->buf[sc->ptr + 4] << 32)
-		| ((uint64_t)sc->buf[sc->ptr + 5] << 40)
-		| ((uint64_t)sc->buf[sc->ptr + 6] << 48)
-		| ((uint64_t)sc->buf[sc->ptr + 7] << 56);
-	sc->ptr += 8;
-	return x;
-}
-#endif
-
 /*
  * SHA-3 implementation.
  * This is a variation on the SHAKE implementation, which implements
@@ -535,6 +466,13 @@ int comp_encode(unsigned logn, const int16_t *s, uint8_t *d, size_t dlen);
    single valid (canonical) encoding. */
 int comp_decode(unsigned logn, const uint8_t *d, size_t dlen, int16_t *s);
 
+/* Maximum L-infinity norm for the signature elements. This is enforced
+   by the encoding and decoding functions. The internal format is good
+   for a norm up to 2047, but the standard is more restrictive (it helps
+   with some security proofs). */
+#define B_INF   840
+/* Note: constant also defined in mq_cm4.s and codec_cm4.s */
+
 /* ==================================================================== */
 /*
  * Computations modulo q = 12289.
@@ -567,9 +505,11 @@ int comp_decode(unsigned logn, const uint8_t *d, size_t dlen, int16_t *s);
 #define mqpoly_sub                    fndsa_mqpoly_sub
 #define mqpoly_add                    fndsa_mqpoly_add
 #define mqpoly_is_invertible          fndsa_mqpoly_is_invertible
+#if 0 /* obsolete */
 #define mqpoly_div_small              fndsa_mqpoly_div_small
-#define mqpoly_sqnorm_ext             fndsa_mqpoly_sqnorm_ext
-#define mqpoly_sqnorm_int             fndsa_mqpoly_sqnorm_int
+#endif
+#define mqpoly_sqnorm_binf_ext        fndsa_mqpoly_sqnorm_binf_ext
+#define mqpoly_sqnorm_binf_int        fndsa_mqpoly_sqnorm_binf_int
 #define mqpoly_sqnorm_int_to_signed   fndsa_mqpoly_sqnorm_int_to_signed
 #define mqpoly_sqnorm_signed          fndsa_mqpoly_sqnorm_signed
 #define mqpoly_sqnorm_is_acceptable   fndsa_mqpoly_sqnorm_is_acceptable
@@ -628,26 +568,30 @@ void mqpoly_add(unsigned logn, uint16_t *a, const uint16_t *b);
    have n elements. Returned value is 1 if invertible, 0 otherwise. */
 int mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp);
 
+#if 0 /* obsolete */
 /* Compute h = g/f. Output is in external representation (coefficients
    in [0,q-1]). This function assumes that f is invertible. tmp[] must
    have n elements. */
 void mqpoly_div_small(unsigned logn, const int8_t *g, const int8_t *f,
 	uint16_t *h, uint16_t *tmp);
+#endif
 
 /* Compute the squared norm of a polynomial (in internal representation).
    The squared norm includes an implicit normalization to [-q/2,+q/2].
-   If the value exceeds 2^31-1 then 2^32-1 is returned. */
-uint32_t mqpoly_sqnorm_int(unsigned logn, const uint16_t *a);
+   If the value exceeds 2^31-1 then 2^32-1 is returned.
+   2^32-1 is also returned if any of the coefficients exceeds B_INF. */
+uint32_t mqpoly_sqnorm_binf_int(unsigned logn, const uint16_t *a);
 
 /* Compute the squared norm of a polynomial (in external representation).
    The squared norm includes an implicit normalization to [-q/2,+q/2].
-   If the value exceeds 2^31-1 then 2^32-1 is returned. */
+   If the value exceeds 2^31-1 then 2^32-1 is returned.
+   2^32-1 is also returned if any of the coefficients exceeds B_INF. */
 static inline uint32_t
-mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a)
+mqpoly_sqnorm_binf_ext(unsigned logn, const uint16_t *a)
 {
 	/* Implementation with internal representation is compatible with
 	   external representation. */
-	return mqpoly_sqnorm_int(logn, a);
+	return mqpoly_sqnorm_binf_int(logn, a);
 }
 
 /* Convert (in-place) a polynomial from internal representation to signed
@@ -683,8 +627,10 @@ extern const uint16_t mq_iGM[];
 #define avx2_mqpoly_div_ntt               fndsa_avx2_mqpoly_div_ntt
 #define avx2_mqpoly_sub                   fndsa_avx2_mqpoly_sub
 #define avx2_mqpoly_is_invertible         fndsa_avx2_mqpoly_is_invertible
+#if 0 /* obsolete */
 #define avx2_mqpoly_div_small             fndsa_avx2_mqpoly_div_small
-#define avx2_mqpoly_sqnorm_ext            fndsa_avx2_mqpoly_sqnorm_ext
+#endif
+#define avx2_mqpoly_sqnorm_binf_ext       fndsa_avx2_mqpoly_sqnorm_binf_ext
 #define avx2_mqpoly_sqnorm_signed         fndsa_avx2_mqpoly_sqnorm_signed
 void avx2_mqpoly_small_to_int(unsigned logn, const int8_t *f, uint16_t *d);
 void avx2_mqpoly_signed_to_int(unsigned logn, uint16_t *d);
@@ -697,9 +643,11 @@ void avx2_mqpoly_mul_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
 int avx2_mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
 void avx2_mqpoly_sub(unsigned logn, uint16_t *a, const uint16_t *b);
 int avx2_mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp);
+#if 0 /* obsolete */
 void avx2_mqpoly_div_small(unsigned logn, const int8_t *f, const int8_t *g,
 	uint16_t *h, uint16_t *tmp);
-uint32_t avx2_mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a);
+#endif
+uint32_t avx2_mqpoly_sqnorm_binf_ext(unsigned logn, const uint16_t *a);
 uint32_t avx2_mqpoly_sqnorm_signed(unsigned logn, const uint16_t *a);
 #endif
 
@@ -711,17 +659,11 @@ uint32_t avx2_mqpoly_sqnorm_signed(unsigned logn, const uint16_t *a);
 /* Hash a (pre-hashed) message into a polynomial.
     logn              degree (logarithmic, 2 to 10)
     nonce             40-byte random nonce
-    hashed_vrfy_key   64-byte hashed public key (with SHAKE256)
-    ctx, ctx_len      domain separation context (at most 255 bytes)
-    hash_id           hash identifier
-    hv, hv_len        pre-hashed message (raw if hash_id = FNDSA_HASH_ID_RAW)
+    mu                64-byte message representative
     c                 output polynomial  */
 #define hash_to_point   fndsa_hash_to_point
 void hash_to_point(unsigned logn,
-	const uint8_t *nonce, const uint8_t *hashed_vrfy_key,
-	const void *ctx, size_t ctx_len,
-	const char *hash_id, const void *hv, size_t hv_len,
-	uint16_t *c);
+	const uint8_t *nonce, const uint8_t *mu, uint16_t *c);
 
 #if FNDSA_AVX2
 #define has_avx2   fndsa_has_avx2
@@ -736,6 +678,46 @@ tbmask(uint32_t x)
 {
 	return (uint32_t)(*(int32_t *)&x >> 31);
 }
+
+/* GCC has __builtin_ctz() since some version 3.4.x. We use it with
+   version 4+.
+   Clang can test presence of builtins. */
+#if defined __clang__ && defined __has_builtin
+#if __has_builtin(__builtin_ctz)
+#define ctz32_nonzero(x)   __builtin_ctz(x)
+#endif
+#elif defined __GNUC__ && __GNUC__ >= 4
+#define ctz32_nonzero(x)   __builtin_ctz(x)
+#elif defined _MSC_VER && _MSC_VER >= 1500
+/* TODO: find out when MSVC started supporting this. It was already
+   documented in May 2009 (this is the earliest copy of the documentation
+   in archive.org), so presumably it was at least in MSVC 2008, which
+   is what we test above. */
+#define ctz32_nonzero(x)   (_BitScanForward(x) - 1)
+#endif
+
+/* Get the number of trailing zeros in a 32-bit value. The input MUST NOT
+   be equal to zero. Returned value is in the [0,31] range. */
+#ifndef ctz32_nonzero
+static inline int
+ctz32_nonzero(uint32_t x)
+{
+	uint32_t m = tbmask((x & 0xFFFF) - 1);
+	uint32_t s = m & 16;
+	x |= (x >> 16) & m;
+	m = tbmask((x & 0x00FF) - 1);
+	s |= m & 8;
+	x |= (x >> 8) & m;
+	m = tbmask((x & 0x000F) - 1);
+	s |= m & 4;
+	x |= (x >> 4) & m;
+	m = tbmask((x & 0x0003) - 1);
+	s |= m & 2;
+	x |= (x >> 2) & m;
+	s |= (1 - (x & 1));
+	return s;
+}
+#endif
 
 /* Get the number of leading zeros in a 32-bit value. */
 static inline unsigned

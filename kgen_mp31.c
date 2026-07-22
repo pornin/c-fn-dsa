@@ -4,6 +4,70 @@
 
 #include "kgen_inner.h"
 
+/* see kgen_inner.h */
+uint32_t
+mp_div(uint32_t x, uint32_t y, uint32_t p)
+{
+	uint32_t a = y;
+	uint32_t b = p;
+	uint32_t u = x;
+	uint32_t v = 0;
+	for (int i = 0; i < 62; i ++) {
+		uint32_t a_odd = -(a & 1);
+		uint32_t swap = tbmask(a - b) & a_odd;
+		uint32_t t1 = swap & (a ^ b);
+		a ^= t1;
+		b ^= t1;
+		uint32_t t2 = swap & (u ^ v);
+		u ^= t2;
+		v ^= t2;
+		a -= a_odd & b;
+		u = mp_sub(u, a_odd & v, p);
+		a >>= 1;
+		u = mp_half(u, p);
+	}
+
+	/* GCD is in b; it is 1 if and only if y was invertible.
+	   Otherwise, the GCD is greater than 1. */
+	return v & tbmask(b - 2);
+}
+
+#if FNDSA_AVX2
+/* see ng_inner.h */
+TARGET_AVX2
+__m256i
+mp_div_x8(__m256i ynum, __m256i yden, __m256i yp)
+{
+	__m256i ya = yden;
+	__m256i yb = yp;
+	__m256i yu = ynum;
+	__m256i yv = _mm256_setzero_si256();
+	__m256i y1 = _mm256_set1_epi32(1);
+	for (int i = 0; i < 62; i ++) {
+		__m256i ya_odd = _mm256_sub_epi32(_mm256_setzero_si256(),
+			_mm256_and_si256(ya, y1));
+		__m256i yswap = _mm256_and_si256(ya_odd,
+			_mm256_srai_epi32(_mm256_sub_epi32(ya, yb), 31));
+		__m256i yt1 = _mm256_and_si256(yswap, _mm256_xor_si256(ya, yb));
+		ya = _mm256_xor_si256(ya, yt1);
+		yb = _mm256_xor_si256(yb, yt1);
+		__m256i yt2 = _mm256_and_si256(yswap, _mm256_xor_si256(yu, yv));
+		yu = _mm256_xor_si256(yu, yt2);
+		yv = _mm256_xor_si256(yv, yt2);
+		ya = _mm256_sub_epi32(ya, _mm256_and_si256(ya_odd, yb));
+		yu = mp_sub_x8(yu, _mm256_and_si256(ya_odd, yv), yp);
+		ya = _mm256_srli_epi32(ya, 1);
+		yu = mp_half_x8(yu, yp);
+	}
+
+	/* GCD is in yb; it is 1 if and only if yden was invertible.
+	   Otherwise, the GCD is greater than 1. */
+	return _mm256_and_si256(yv, _mm256_srai_epi32(
+		_mm256_sub_epi32(yb, _mm256_set1_epi32(2)), 31));
+}
+
+#endif
+
 /*
  * Bit-reversal index table (over 10 bits).
  */

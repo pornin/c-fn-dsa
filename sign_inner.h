@@ -612,18 +612,16 @@ void fpoly_apply_basis(unsigned logn, fpr *t0, fpr *t1,
  */
 
 typedef struct {
-#if FNDSA_SHAKE256X4
-	shake256x4_context pc;
-#else
 	shake_context pc;
-#endif
 	unsigned logn;
 } sampler_state;
 
+#if 0 /* obsolete */
 /* Initialize the sampler for a given degree and seed. */
 #define sampler_init   fndsa_sampler_init
 void sampler_init(sampler_state *ss, unsigned logn,
 	const void *seed, size_t seed_len);
+#endif
 
 /* Sample the next small integer. Parameters are:
       ss       sampler state
@@ -651,7 +649,7 @@ void ffsamp_fft(sampler_state *ss, fpr *tmp);
 
 /* This function is global on ARM Cortex M4 so that it can be called
    from assembly code. We define its global name here so that test code
-   can override it (in test_sampler.c and test_sign.c). */
+   can override it (in test_sign.c). */
 #if FNDSA_ASM_CORTEXM4
 #define ffsamp_fft_deepest   fndsa_ffsamp_fft_deepest
 #endif
@@ -663,21 +661,18 @@ void ffsamp_fft(sampler_state *ss, fpr *tmp);
 
 /* Internal signing function. The complete signing key (encoded for f,
    g and F, but skipping the leading header byte, and decoded for G) is
-   provided, as well as the hashed verifying key, data to sign (context,
-   id, hash value), the random seed to work on (optional), the signature
-   output buffer, and the temporary area. The signature buffer has been
-   verified to be large enough. The temporary area is large enough and
-   32-byte aligned.
+   provided, as well as the message representative (mu), the random
+   seed to work on, the signature output buffer, and the temporary area.
+   The signature buffer has been verified to be large enough. The
+   temporary area is large enough and 32-byte aligned.
 
-   Returned value is the signature size (in bytes), or 0 on error. An
-   error is possible if seed is NULL and the system RNG fails.
+   Returned value is the signature size (in bytes), or 0 on error.
+   An error may conceptually happen if the private key is incorrect/invalid.
 
    tmp size: 58*n bytes  */
 #define sign_core   fndsa_sign_core
 size_t sign_core(unsigned logn,
-	const uint8_t *sign_key_fgF, const int8_t *G,
-	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
-	const char *id, const uint8_t *hv, size_t hv_len,
+	const uint8_t *sign_key_fgF, const int8_t *G, const uint8_t *mu,
 	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp);
 
 /* ==================================================================== */

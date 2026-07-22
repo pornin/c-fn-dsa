@@ -2,7 +2,7 @@
 #include <string.h>
 
 #include "timing.h"
-#include "../inner.h"
+#include "../fndsa.h"
 
 static inline uint32_t
 dec32le(const void *src)
@@ -50,22 +50,10 @@ main(void)
 	   remains small). */
 	static uint8_t skey[FNDSA_SIGN_KEY_SIZE(10)];
 	static uint8_t vkey[FNDSA_VRFY_KEY_SIZE(10)];
-	static uint8_t tmp[26655];
-
-#if 0
-	/* RAM is the CCM block. For logn=10, we need to use the extra
-	   RAM block (128 kB at address 0x20000000), which is a bit slower
-	   since it can get into some contention with instruction fetching. */
-	static uint8_t *tmp_big = (uint8_t *)(uintptr_t)0x20000000;
-#endif
+	static uint8_t tmp[22559];
 
 	/* For each degree, we make one measurement with a reproducible
-	   seed value. Seed was chosen such that the hash-to-point cost
-	   is the "high" one (hash-to-point uses a variable amount of
-	   SHAKE256 output, which in turn implies a variable number of
-	   invocations of Keccak-f. We consider the two most common numbers
-	   of calls to Keccak-f, and the seed exercises the higher of these
-	   two numbers. */
+	   seed value. */
 	for (unsigned logn = 8; logn <= 10; logn ++) {
 		uint8_t seed[2];
 		seed[0] = (uint8_t)logn;
@@ -89,11 +77,13 @@ main(void)
 		prf("FN-DSA(n = %4u)  kgen: %9u\n", 1u << logn, time_kgen);
 
 		/*
+		prf("sign_key_size = %u\n", FNDSA_SIGN_KEY_SIZE(logn));
 		prf("sign_key = ");
 		for (size_t i = 0; i < FNDSA_SIGN_KEY_SIZE(logn); i ++) {
 			prf("%02X", skey[i]);
 		}
 		prf("\n");
+		prf("vrfy_key_size = %u\n", FNDSA_VRFY_KEY_SIZE(logn));
 		prf("vrfy_key = ");
 		for (size_t i = 0; i < FNDSA_VRFY_KEY_SIZE(logn); i ++) {
 			prf("%02X", vkey[i]);

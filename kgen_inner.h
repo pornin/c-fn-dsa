@@ -137,6 +137,17 @@ mp_mmul(uint32_t a, uint32_t b, uint32_t p, uint32_t p0i)
 #endif
 }
 
+/* Divide x by y modulo p. If y is not invertible modulo p, then this
+   function returns 0. Source values x and y MUST be in [0,p-1].
+   Modulus p MUST be odd (it is not necessary that p is prime). */
+#define mp_div   fndsa_mp_div
+uint32_t mp_div(uint32_t x, uint32_t y, uint32_t p);
+
+#if FNDSA_AVX2
+#define mp_div_x8   fndsa_mp_div_x8
+TARGET_AVX2 __m256i mp_div_x8(__m256i ynum, __m256i yden, __m256i yp);
+#endif
+
 /* Return 2^(31*e) mod p. This function assumes that e is not secret. */
 static inline uint32_t
 mp_Rx31(unsigned e, uint32_t p, uint32_t p0i, uint32_t R2)
@@ -458,7 +469,7 @@ void avx2_zint_rebuild_CRT(uint32_t *restrict xx, size_t xlen, size_t n,
 
 TARGET_AVX2
 static inline __m256i
-zint_mod_small_signed_x8(const uint32_t *d, size_t len, size_t stride,
+avx2_zint_mod_small_signed_x8(const uint32_t *d, size_t len, size_t stride,
         __m256i yp, __m256i yp0i, __m256i yR2, __m256i yRx)
 {
 	if (len == 0) {
@@ -762,6 +773,11 @@ void vect_norm_fft(unsigned logn, fxr *restrict d,
 void vect_invnorm_fft(unsigned logn, fxr *restrict d,
 	const fxr *restrict a, const fxr *restrict b, unsigned e);
 
+/* Compute d = (2^e)*adj(a)/(a*adj(a)), written back into a[]. Polynomials
+   are in FFT representation. */
+#define vect_inv_mul2e_fft   fndsa_vect_inv_mul2e_fft
+void vect_inv_mul2e_fft(unsigned logn, fxr *a, unsigned e);
+
 #if FNDSA_AVX2
 TARGET_AVX2
 static inline __m256i
@@ -877,6 +893,8 @@ void avx2_vect_norm_fft(unsigned logn, fxr *restrict d,
 #define avx2_vect_invnorm_fft   fndsa_avx2_vect_invnorm_fft
 void avx2_vect_invnorm_fft(unsigned logn, fxr *restrict d,
 	const fxr *restrict a, const fxr *restrict b, unsigned e);
+#define avx2_vect_inv_mul2e_fft   fndsa_avx2_vect_inv_mul2e_fft
+void avx2_vect_inv_mul2e_fft(unsigned logn, fxr *a, unsigned e);
 #endif
 
 /* ==================================================================== */
@@ -985,26 +1003,25 @@ poly_sub_scaled_ntt(unsigned logn, uint32_t *restrict F, size_t Flen,
 /* depth = 1
    logn = logn_top - depth
    Inputs:
-      F, G    polynomials of degree 2^logn, plain integer representation (FGlen)
-      FGlen   size of each coefficient of F and G (must be 1 or 2)
-      f, g    polynomials of degree 2^logn_top, small coefficients
+      F       polynomial of degree 2^logn, plain integer representation (FGlen)
+      FGlen   size of each coefficient of F (must be 1 or 2)
+      f       polynomial of degree 2^logn_top, small coefficients
       k       polynomial of degree 2^logn (plain, 32-bit)
       sc      scaling logarithm (public value)
       tmp     temporary with room at least max(FGlen, 2^logn_top) words
    Operation:
       F <- F - (2^sc)*k*ft
-      G <- G - (2^sc)*k*gt
-   with (ft,gt) being the degree-n polynomials corresponding to (f,g)
+   with ft being the degree-n polynomial corresponding to f.
    It is assumed that the result fits.
   
    WARNING: polynomial k is consumed in the process.
   
    This function uses 3*n words in tmp[]. */
-#define poly_sub_kfg_scaled_depth1   fndsa_poly_sub_kfg_scaled_depth1
-void poly_sub_kfg_scaled_depth1(unsigned logn_top,
-	uint32_t *restrict F, uint32_t *restrict G, size_t FGlen,
+#define poly_sub_kf_scaled_depth1   fndsa_poly_sub_kf_scaled_depth1
+void poly_sub_kf_scaled_depth1(unsigned logn_top,
+	uint32_t *restrict F, size_t FGlen,
 	uint32_t *restrict k, uint32_t sc,
-	const int8_t *restrict f, const int8_t *restrict g,
+	const int8_t *restrict f,
 	uint32_t *restrict tmp);
 
 /* Compute the squared norm of a small polynomial. */
@@ -1029,11 +1046,11 @@ void
 avx2_poly_sub_scaled_ntt(unsigned logn, uint32_t *restrict F, size_t Flen,
 	const uint32_t *restrict f, size_t flen,
 	const int32_t *restrict k, uint32_t sc, uint32_t *restrict tmp);
-#define avx2_poly_sub_kfg_scaled_depth1   fndsa_avx2_poly_sub_kfg_scaled_depth1
-void avx2_poly_sub_kfg_scaled_depth1(unsigned logn_top,
-	uint32_t *restrict F, uint32_t *restrict G, size_t FGlen,
+#define avx2_poly_sub_kf_scaled_depth1   fndsa_avx2_poly_sub_kf_scaled_depth1
+void avx2_poly_sub_kf_scaled_depth1(unsigned logn_top,
+	uint32_t *restrict F, size_t FGlen,
 	uint32_t *restrict k, uint32_t sc,
-	const int8_t *restrict f, const int8_t *restrict g,
+	const int8_t *restrict f,
 	uint32_t *restrict tmp);
 #define avx2_poly_sqnorm   fndsa_avx2_poly_sqnorm
 uint32_t avx2_poly_sqnorm(unsigned logn, const int8_t *f);
@@ -1085,17 +1102,10 @@ int avx2_check_ortho_norm(unsigned logn,
  * (f,g) sampling (Gaussian distribution).
  */
 
-#if FNDSA_SHAKE256X4
-/* Sample f (or g) from the provided SHAKE256x4 PRNG. This function
-   ensures that the sampled polynomial has odd parity. */
-#define sample_f   fndsa_sample_f
-void sample_f(unsigned logn, shake256x4_context *pc, int8_t *f);
-#else
 /* Sample f (or g) from the provided SHAKE-based PRNG. This function
    ensures that the sampled polynomial has odd parity. */
 #define sample_f   fndsa_sample_f
 void sample_f(unsigned logn, shake_context *pc, int8_t *f);
-#endif
 
 /* ==================================================================== */
 

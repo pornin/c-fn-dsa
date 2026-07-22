@@ -29,13 +29,16 @@ basis_to_FFT(unsigned logn,
 	fpoly_neg(logn, b11);
 }
 
+/* disabled code for one-time test vector gathering
+uint8_t KAT_SAMPLER_seed[41];
+uint8_t KAT_SAMPLER_nonce[40];
+*/
+
 /* see sign_inner.h */
 TARGET_SSE2 TARGET_NEON
 size_t
 sign_core(unsigned logn,
-	const uint8_t *sign_key_fgF, const int8_t *G,
-	const uint8_t *hashed_vk, const uint8_t *ctx, size_t ctx_len,
-	const char *id, const uint8_t *hv, size_t hv_len,
+	const uint8_t *sign_key_fgF, const int8_t *G, const uint8_t *mu,
 	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp)
 {
 	/* Output value is 0 on error, or the signature length on success. */
@@ -76,75 +79,32 @@ sign_core(unsigned logn,
 	size_t flen = (nbits << logn) >> 3;
 	int8_t *F = (int8_t *)(sign_key_fgF + (flen << 1));
 
-	/* The special hash identifier consisting of a byte of value 0xFF
-	   followed by a zero denotes the original Falcon algorithm, which
-	   we support for now for test vector reproducibility.
-	   TODO: remove when final test vectors are available. */
-	int orig_falcon = (*(const uint8_t *)id == 0xFF && id[1] == 0);
+	/* The loop contents usually run one time; restart probability
+	   is about 1/2450 at n=512, 1/820 at n=1024. Thus, probability
+	   of needing more than 27 iterations is less than 2^(-256).
+	   We force an exit after 27 iterations; repeated failures are
+	   conceptually feasible if the private key has invalid contents. */
+	for (uint8_t counter = 0; counter < 27; counter ++) {
+		/* Initialize a SHAKE context which will be used throughout
+		   for getting the 40-byte nonce, then the sampling. */
+		sampler_state ss;
+		ss.logn = logn;
+		shake_init(&ss.pc, 256);
+		shake_inject(&ss.pc, seed, seed_len);
+		shake_inject(&ss.pc, &counter, 1);
+		shake_flip(&ss.pc);
+		uint8_t nonce[40];
+		shake_extract(&ss.pc, nonce, sizeof nonce);
 
-	/* Buffer for randomness: we need a 40-byte nonce and a 56-byte
-	   sub-seed for sampling. */
-	uint8_t rndbuf[40 + 56];
-	uint8_t *nonce = rndbuf;
-	uint8_t *subseed = rndbuf + 40;
-
-	/* TODO: add "hedging" by hashing together the private key, the
-	   message and the seed, to get a new seed value (protection against
-	   bad RNG). We don't need to use the complete private key; we can
-	   use F. */
-
-	for (uint32_t counter = 0;; counter ++) {
-		/* Generate the nonce and the sub-seed. In the original
-		   Falcon, the nonce was not regenerated in case of
-		   restart, but regenerating it makes the algorithm security
-		   easier to analyze and prove.
-
-		   When working with an explicit seed: normally, we hash
-		   together the seed and a loop counter. For test purposes,
-		   if we are using the original Falcon behaviour, this is
-		   the first iteration, and the seed length is exactly 96
-		   bytes, then we use the seed directly. */
-		uint8_t *rndp;
-		size_t rndlen;
-		if (counter == 0 || !orig_falcon) {
-			rndp = rndbuf;
-			rndlen = sizeof rndbuf;
-		} else {
-			rndp = rndbuf + 40;
-			rndlen = (sizeof rndbuf) - 40;
-		}
-		if (seed == NULL) {
-			if (!sysrng(rndp, rndlen)) {
-				goto sign_exit;
-			}
-		} else if (orig_falcon && counter == 0 && seed_len == rndlen) {
-			memcpy(rndp, seed, rndlen);
-		} else {
-			/* We can use the tmp buffer for the SHAKE context.
-			   It even works at n = 4 (logn = 2) because there
-			   are 58*4 = 232 bytes free in tmp[] at this point,
-			   and we need only 208. */
-			shake_context *sc = (shake_context *)tmp;
-			shake_init(sc, 256);
-			shake_inject(sc, seed, seed_len);
-			uint8_t cbuf[4];
-			cbuf[0] = (uint8_t)counter;
-			cbuf[1] = (uint8_t)(counter >> 8);
-			cbuf[2] = (uint8_t)(counter >> 16);
-			cbuf[3] = (uint8_t)(counter >> 24);
-			shake_inject(sc, cbuf, 4);
-			shake_flip(sc);
-			shake_extract(sc, rndp, rndlen);
-		}
+		/* disabled code for one-time test vector gathering
+		memcpy(KAT_SAMPLER_seed, seed, seed_len);
+		KAT_SAMPLER_seed[seed_len] = counter;
+		memcpy(KAT_SAMPLER_nonce, nonce, 40);
+		*/
 
 		/* Hash the message into a polynomial. */
 		uint16_t *hm = (uint16_t *)((uint8_t *)tmp + 56 * n);
-		hash_to_point(logn, nonce, hashed_vk,
-			ctx, ctx_len, id, hv, hv_len, hm);
-
-		/* Initialize a sampler state. */
-		sampler_state ss;
-		sampler_init(&ss, logn, subseed, 56);
+		hash_to_point(logn, nonce, mu, hm);
 
 		/* Compute the lattice basis B = [[g, -f], [G, -F]] in FFT
 		   representation, then compute the Gram matrix G = B*adj(B):
@@ -161,7 +121,10 @@ sign_core(unsigned logn,
 		      g01 (n)
 		      g11 (n)
 		      b11 (n)
-		      b01 (n)  */
+		      b01 (n)
+		   We do this computation inside the loop instead of outside
+		   because we consume the values in the computations (for
+		   space-saving reasons). */
 		int8_t *f = (int8_t *)tmp;
 		int8_t *g = f + n;
 		(void)trim_i8_decode(logn, sign_key_fgF, f, nbits);
@@ -214,16 +177,17 @@ sign_core(unsigned logn,
 
 		/*
 		 * At this point, [t0,t1] are the FFT representation of
-		 * the sampled vector; in normal (non-FFT) representation,
-		 * [t0,t1] is integral. We want to apply the lattice basis
-		 * Compute the lattice basis B = [[g, -f], [G, -F]] to that
-		 * vector, and subtract the result from [hm,0] to get the
-		 * signature value. These computations can be done either
-		 * in the FFT domain, or in with integers; and integer
-		 * computations can be done modulo q = 12289 since the
-		 * signature verification also works modulo q. Using
-		 * integers is faster than staying in FFT representation
-		 * when floating-point operations are emulated.
+		 * the sampled vector; in normal (non-FFT)
+		 * representation, [t0,t1] is integral. We want to apply
+		 * the lattice basis B = [[g, -f], [G, -F]] to that
+		 * vector, and subtract the result from [hm,0] to get
+		 * the signature value. These computations can be done
+		 * either in the FFT domain, or with integers; and
+		 * integer computations can be done modulo q = 12289
+		 * since the signature verification also works modulo q.
+		 * Using integers is faster than staying in FFT
+		 * representation when floating-point operations are
+		 * emulated.
 		 */
 #if !(FNDSA_SSE2 || FNDSA_NEON || FNDSA_RV64D)
 
@@ -234,55 +198,10 @@ sign_core(unsigned logn,
 		uint16_t *ut1 = ut0 + n;
 		uint16_t *ut2 = ut1 + n;
 		uint16_t *ut3 = ut2 + n;
-#if FNDSA_SSE2
-		/* We inline an fpr_rint() implementation, using SSE2
-		   intrinsics (_mm_cvtpd_epi32() for rounding to neareast
-		   with roundTiesToEven). */
-		for (size_t i = 0; i < n; i += 2) {
-			__m128d xt = _mm_loadu_pd((const double *)t0 + i);
-			__m128i zt = _mm_cvtpd_epi32(xt);
-			ut0[i + 0] = (uint16_t)_mm_cvtsi128_si32(zt);
-			ut0[i + 1] = (uint16_t)_mm_cvtsi128_si32(
-				_mm_bsrli_si128(zt, 4));
-		}
-		for (size_t i = 0; i < n; i += 2) {
-			__m128d xt = _mm_loadu_pd((const double *)t1 + i);
-			__m128i zt = _mm_cvtpd_epi32(xt);
-			ut1[i + 0] = (uint16_t)_mm_cvtsi128_si32(zt);
-			ut1[i + 1] = (uint16_t)_mm_cvtsi128_si32(
-				_mm_bsrli_si128(zt, 4));
-		}
-#elif FNDSA_NEON
-		/* We inline an fpr_rint() implementation, using NEON
-		   intrinsics (vcvtnq_s64_f64() for rounding to neareast
-		   with roundTiesToEven). */
-		for (size_t i = 0; i < n; i += 2) {
-			float64x2_t xt = vld1q_f64((const float64_t *)t0 + i);
-			int64x2_t zt = vcvtnq_s64_f64(xt);
-			ut0[i + 0] = (uint16_t)vgetq_lane_s64(zt, 0);
-			ut0[i + 1] = (uint16_t)vgetq_lane_s64(zt, 1);
-		}
-		for (size_t i = 0; i < n; i += 2) {
-			float64x2_t xt = vld1q_f64((const float64_t *)t1 + i);
-			int64x2_t zt = vcvtnq_s64_f64(xt);
-			ut1[i + 0] = (uint16_t)vgetq_lane_s64(zt, 0);
-			ut1[i + 1] = (uint16_t)vgetq_lane_s64(zt, 1);
-		}
-#elif FNDSA_RV64D
-		const f64 *tt0 = (const f64 *)t0;
-		const f64 *tt1 = (const f64 *)t1;
-		for (size_t i = 0; i < n; i ++) {
-			ut0[i] = (uint64_t)f64_rint(tt0[i]);
-		}
-		for (size_t i = 0; i < n; i ++) {
-			ut1[i] = (uint64_t)f64_rint(tt1[i]);
-		}
-#else
 		for (size_t i = 0; i < n; i ++) {
 			ut0[i] = (uint16_t)fpr_rint(t0[i]);
 			ut1[i] = (uint16_t)fpr_rint(t1[i]);
 		}
-#endif
 		mqpoly_signed_to_int(logn, ut0);
 		mqpoly_signed_to_int(logn, ut1);
 
@@ -310,7 +229,7 @@ sign_core(unsigned logn,
 		memcpy(ut3, hm, n * sizeof(uint16_t));
 		mqpoly_ext_to_int(logn, ut3);
 		mqpoly_sub(logn, ut3, ut2);
-		uint32_t sqn1 = mqpoly_sqnorm_int(logn, ut3);
+		uint32_t sqn1 = mqpoly_sqnorm_binf_int(logn, ut3);
 
 		/* s2 = -(-f*t0 - F*t1) = f*t0 + F*t1
 		   We compute s2 into ut3. */
@@ -374,7 +293,8 @@ sign_core(unsigned logn,
 
 		/* We compute s1, then s2 into buffer s2 (s1 is not
 		   retained). We accumulate their squared norm in sqn,
-		   with an "overflow" flag in ng. */
+		   with an "overflow" flag in ng. We also set the ng flag
+		   if the L-infinity norm of s1 is beyond B_INF. */
 		uint32_t sqn = 0;
 		uint32_t ng = 0;
 		int16_t *s2 = (int16_t *)w0;
@@ -396,6 +316,11 @@ sign_core(unsigned logn,
 			ng |= sqn;
 			sqn += (uint32_t)(z1 * z1);
 			ng |= sqn;
+			/* L-infinity norm check on s1. */
+			ng |= (uint32_t)(B_INF - z0);
+			ng |= (uint32_t)(B_INF + z0);
+			ng |= (uint32_t)(B_INF - z1);
+			ng |= (uint32_t)(B_INF + z1);
 		}
 		for (size_t i = 0; i < n; i += 2) {
 			__m128d xt = _mm_loadu_pd((const double *)t1 + i);
@@ -429,6 +354,11 @@ sign_core(unsigned logn,
 			ng |= sqn;
 			sqn += (uint32_t)(z1 * z1);
 			ng |= sqn;
+			/* L-infinity norm check on s1. */
+			ng |= (uint32_t)(B_INF - z0);
+			ng |= (uint32_t)(B_INF + z0);
+			ng |= (uint32_t)(B_INF - z1);
+			ng |= (uint32_t)(B_INF + z1);
 		}
 		for (size_t i = 0; i < n; i += 2) {
 			float64x2_t xt = vld1q_f64((const float64_t *)t1 + i);
@@ -452,6 +382,9 @@ sign_core(unsigned logn,
 			int32_t z = *(int16_t *)&zu;
 			sqn += (uint32_t)(z * z);
 			ng |= sqn;
+			/* L-infinity norm check on s1. */
+			ng |= (uint32_t)(B_INF - z);
+			ng |= (uint32_t)(B_INF + z);
 		}
 		for (size_t i = 0; i < n; i ++) {
 			uint16_t zu = -(uint16_t)f64_rint(tt1[i]);
@@ -466,6 +399,9 @@ sign_core(unsigned logn,
 			int32_t z = *(int16_t *)&zu;
 			sqn += (uint32_t)(z * z);
 			ng |= sqn;
+			/* L-infinity norm check on s1. */
+			ng |= (uint32_t)(B_INF - z);
+			ng |= (uint32_t)(B_INF + z);
 		}
 		for (size_t i = 0; i < n; i ++) {
 			uint16_t zu = -(uint16_t)fpr_rint(t1[i]);
@@ -486,20 +422,23 @@ sign_core(unsigned logn,
 		}
 #endif
 
-		/* We have a candidate signature; we must encode it. This
-		   may fail, if the signature cannot be encoded in the
-		   target size. */
+		/* We have a candidate signature (s1, s2). The L-2 norm of
+		   the whole vector, and the L-infinity norm of s1, have
+		   been verified. We must still check the L-infinity norm
+		   of s2, and encode it. If the L-infinity norm of s2 is
+		   too large, or if the polynomial cannot be encoded within
+		   the defined output buffer, then we must restart. The
+		   comp_encode() function performs both checks. */
 		size_t sig_len = FNDSA_SIGNATURE_SIZE(logn);
 		if (comp_encode(logn, s2, sig + 41, sig_len - 41)) {
 			/* Success! */
 			sig[0] = 0x30 + logn;
 			memcpy(sig + 1, nonce, 40);
 			ret = sig_len;
-			goto sign_exit;
+			break;
 		}
 	}
 
-sign_exit:
 #if FNDSA_SSE2
 	_MM_SET_ROUNDING_MODE(round_mode);
 #endif

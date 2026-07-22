@@ -18,11 +18,12 @@ trim_i8_encode(unsigned logn, const int8_t *f, unsigned nbits, uint8_t *d)
 	unsigned acc_len = 0;
 	uint32_t mask = ((uint32_t)1 << nbits) - 1;
 	for (size_t i = 0; i < n; i ++) {
-		acc = (acc << nbits) | ((uint32_t)f[i] & mask);
+		acc |= ((uint32_t)f[i] & mask) << acc_len;
 		acc_len += nbits;
 		if (acc_len >= 8) {
+			d[j ++] = (uint8_t)acc;
+			acc >>= 8;
 			acc_len -= 8;
-			d[j ++] = (uint8_t)(acc >> acc_len);
 		}
 	}
 	return j;
@@ -39,11 +40,12 @@ trim_i8_decode(unsigned logn, const uint8_t *d, int8_t *f, unsigned nbits)
 	uint32_t mask1 = (1 << nbits) - 1;
 	uint32_t mask2 = 1 << (nbits - 1);
 	for (size_t i = 0; i < needed; i ++) {
-		acc = (acc << 8) | d[i];
+		acc |= (uint32_t)d[i] << acc_len;
 		acc_len += 8;
 		while (acc_len >= nbits) {
+			uint32_t w = acc & mask1;
+			acc >>= nbits;
 			acc_len -= nbits;
-			uint32_t w = (acc >> acc_len) & mask1;
 			w |= -(w & mask2);
 			if (w == -mask2) {
 				return 0;
@@ -65,13 +67,13 @@ mqpoly_encode(unsigned logn, const uint16_t *h, uint8_t *d)
 		uint32_t h1 = h[i + 1];
 		uint32_t h2 = h[i + 2];
 		uint32_t h3 = h[i + 3];
-		d[j + 0] = (uint8_t)(h0 >> 6);
-		d[j + 1] = (uint8_t)((h0 << 2) | (h1 >> 12));
-		d[j + 2] = (uint8_t)(h1 >> 4);
-		d[j + 3] = (uint8_t)((h1 << 4) | (h2 >> 10));
-		d[j + 4] = (uint8_t)(h2 >> 2);
-		d[j + 5] = (uint8_t)((h2 << 6) | (h3 >> 8));
-		d[j + 6] = (uint8_t)h3;
+		d[j + 0] = (uint8_t)h0;
+		d[j + 1] = (uint8_t)((h0 >> 8) | (h1 << 6));
+		d[j + 2] = (uint8_t)(h1 >> 2);
+		d[j + 3] = (uint8_t)((h1 >> 10) | (h2 << 4));
+		d[j + 4] = (uint8_t)(h2 >> 4);
+		d[j + 5] = (uint8_t)((h2 >> 12) | (h3 << 2));
+		d[j + 6] = (uint8_t)(h3 >> 6);
 		j += 7;
 	}
 	return j;
@@ -94,10 +96,10 @@ mqpoly_decode(unsigned logn, const uint8_t *d, uint16_t *h)
 		uint32_t d5 = d[j + 5];
 		uint32_t d6 = d[j + 6];
 		j += 7;
-		uint32_t h0 = (d0 << 6) | (d1 >> 2);
-		uint32_t h1 = ((d1 << 12) | (d2 << 4) | (d3 >> 4)) & 0x3FFF;
-		uint32_t h2 = ((d3 << 10) | (d4 << 2) | (d5 >> 6)) & 0x3FFF;
-		uint32_t h3 = ((d5 << 8) | d6) & 0x3FFF;
+		uint32_t h0 = (d0 | (d1 << 8)) & 0x3FFF;
+		uint32_t h1 = ((d1 >> 6) | (d2 << 2) | (d3 << 10)) & 0x3FFF;
+		uint32_t h2 = ((d3 >> 4) | (d4 << 4) | (d5 << 12)) & 0x3FFF;
+		uint32_t h3 = (d5 >> 2) | (d6 << 6);
 		h[i + 0] = h0;
 		h[i + 1] = h1;
 		h[i + 2] = h2;
@@ -126,32 +128,35 @@ comp_encode(unsigned logn, const int16_t *s, uint8_t *d, size_t dlen)
 	for (size_t i = 0; i < n; i ++) {
 		/* Invariant: acc_len <= 7 */
 		int32_t x = s[i];
-		if (x < -2047 || x > +2047) {
-			return 0;
-		}
 
 		/* Get sign mask and absolute value. */
 		uint32_t sw = (uint32_t)(x >> 16);
 		uint32_t w = ((uint32_t)x ^ sw) - sw;
+		if (w > B_INF) {
+			return 0;
+		}
 
 		/* Encode sign bit and low 7 bits of the absolute value. */
-		acc = (acc << 8) | (sw & 0x80) | (w & 0x7F);
+		acc |= ((sw & 1) | ((w & 0x7F) << 1)) << acc_len;
 		acc_len += 8;
 
 		/* Encode the high bits. Since |x| <= 2047, the high bits
-		   have a value on [0,15], hence we add at most 16 bits. */
-		unsigned wh = (w >> 7) + 1;
-		acc = (acc << wh) | 1;
-		acc_len += wh;
+		   have a value in [0,15], hence we add at most 16 bits
+		   (actual range is lower because B_INF < 2047, but
+		   the code would be good up to 2047 anyway). */
+		unsigned wh = w >> 7;
+		acc |= (uint32_t)1 << (acc_len + wh);
+		acc_len += wh + 1;
 
 		/* We appended at most 8 + 15 + 1 = 24 bits, so the total
 		   accumulated length in acc is at most 31 bits. */
 		while (acc_len >= 8) {
-			acc_len -= 8;
 			if (j >= dlen) {
 				return 0;
 			}
-			d[j ++] = (uint8_t)(acc >> acc_len);
+			d[j ++] = (uint8_t)acc;
+			acc >>= 8;
+			acc_len -= 8;
 		}
 	}
 
@@ -160,7 +165,7 @@ comp_encode(unsigned logn, const int16_t *s, uint8_t *d, size_t dlen)
 		if (j >= dlen) {
 			return 0;
 		}
-		d[j ++] = (uint8_t)(acc << (8 - acc_len));
+		d[j ++] = (uint8_t)acc;
 	}
 
 	/* Pad with zeros. */
@@ -187,30 +192,33 @@ comp_decode(unsigned logn, const uint8_t *d, size_t dlen, int16_t *s)
 		if (j >= dlen) {
 			return 0;
 		}
-		acc = (acc << 8) | d[j ++];
-		uint32_t m = acc >> acc_len;
-		uint32_t t = (m >> 7) & 1;
-		m &= 0x7F;
+		acc |= (uint32_t)d[j ++] << acc_len;
+		uint32_t t = acc & 1;
+		uint32_t m = (acc >> 1) & 0x7F;
+		acc >>= 8;
 
-		/* Get next bits until a 1 is reached.
-		   We'll need up to two extra bytes. */
-		for (;;) {
-			if (acc_len == 0) {
-				if (j >= dlen) {
-					return 0;
-				}
-				acc = (acc << 8) | d[j ++];
-				acc_len = 8;
+		/* Get next bits until a 1 is reached. Since there are at
+		   most 6 bits of value zero before the next 1 (in a valid
+		   encoding), we will need at most one extra bytes. */
+		if (acc == 0) {
+			if (j >= dlen) {
+				return 0;
 			}
-			acc_len --;
-			if (((acc >> acc_len) & 1) != 0) {
-				break;
-			}
-			m += 0x80;
-			if (m > 2047) {
+			acc |= (uint32_t)d[j ++] << acc_len;
+			acc_len += 8;
+			if (acc == 0) {
 				return 0;
 			}
 		}
+		uint32_t tz = ctz32_nonzero(acc);
+		/* Since acc is non-zero but fits on 15 bits, maximum value
+		   of tz is 14. */
+		m += tz << 7;
+		if (m > B_INF) {
+			return 0;
+		}
+		acc >>= tz + 1;
+		acc_len -= tz + 1;
 
 		/* Reject "-0" (which is an invalid encoding). */
 		if (m == 0 && t != 0) {
@@ -222,10 +230,8 @@ comp_decode(unsigned logn, const uint8_t *d, size_t dlen, int16_t *s)
 	}
 
 	/* Check that the unused bits are all zero. */
-	if (acc_len > 0) {
-		if ((acc & ((1 << acc_len) - 1)) != 0) {
-			return 0;
-		}
+	if (acc != 0) {
+		return 0;
 	}
 	while (j < dlen) {
 		if (d[j ++] != 0) {

@@ -2015,3 +2015,51 @@ avx2_vect_invnorm_fft(unsigned logn, fxr *restrict d,
 	}
 }
 #endif
+
+/* see kgen_inner.h */
+void
+vect_inv_mul2e_fft(unsigned logn, fxr *a, unsigned e)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	for (size_t u = 0; u < hn; u ++) {
+		fxr re = a[u];
+		fxr im = fxr_neg(a[u + hn]);
+		fxr z = fxr_add(fxr_sqr(re), fxr_sqr(im));
+		a[u] = fxr_div(fxr_mul2e(re, e), z);
+		a[u + hn] = fxr_div(fxr_mul2e(im, e), z);
+	}
+}
+
+#if FNDSA_AVX2
+/* see kgen_inner.h */
+TARGET_AVX2
+void
+avx2_vect_inv_mul2e_fft(unsigned logn, fxr *a, unsigned e)
+{
+	size_t hn = (size_t)1 << (logn - 1);
+	if (logn >= 3) {
+		__m256i ye = _mm256_set1_epi64x(e);
+		for (size_t u = 0; u < hn; u += 4) {
+			__m256i yre = _mm256_loadu_si256(
+				(const __m256i *)(a + u));
+			__m256i yim = _mm256_loadu_si256(
+				(const __m256i *)(a + u + hn));
+			yim = _mm256_sub_epi64(_mm256_setzero_si256(), yim);
+			__m256i yz = _mm256_add_epi64(
+				fxr_sqr_x4(yre), fxr_sqr_x4(yim));
+			yre = avx2_fxr_div_x4(_mm256_sllv_epi64(yre, ye), yz);
+			yim = avx2_fxr_div_x4(_mm256_sllv_epi64(yim, ye), yz);
+			_mm256_storeu_si256((__m256i *)(a + u), yre);
+			_mm256_storeu_si256((__m256i *)(a + u + hn), yim);
+		}
+		return;
+	}
+	for (size_t u = 0; u < hn; u ++) {
+		fxr re = a[u];
+		fxr im = fxr_neg(a[u + hn]);
+		fxr z = fxr_add(fxr_sqr(re), fxr_sqr(im));
+		a[u] = fxr_div(fxr_mul2e(re, e), z);
+		a[u + hn] = fxr_div(fxr_mul2e(im, e), z);
+	}
+}
+#endif

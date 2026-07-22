@@ -25,7 +25,7 @@ FREQ = 168  # or: 24
 # --------------------------------------------------------------------------
 
 CC = arm-none-eabi-gcc
-CFLAGS = -Wall -Wextra -Wshadow -Wundef -Wno-cast-function-type -std=c99 -ggdb3 -O2 $(ARCHFLAGS) -fno-common -ffunction-sections -fdata-sections -I $(INCDIR) -DSTM32F4 -DFREQ=$(FREQ) -DFNDSA_ASM_CORTEXM4=1
+CFLAGS = -Wall -Wextra -Wshadow -Wundef -Wno-unused-function -Wno-cast-function-type -std=c99 -ggdb3 -O2 $(ARCHFLAGS) -fno-common -ffunction-sections -fdata-sections -I $(INCDIR) -DSTM32F4 -DFREQ=$(FREQ) -DFNDSA_ASM_CORTEXM4=1
 LD = arm-none-eabi-gcc
 LDFLAGS = -L$(LIBDIR) --static -nostartfiles -T$(LDSCRIPT) -ggdb3 $(ARCHFLAGS) -Wl,--gc-sections
 LIBS = -lopencm3_stm32f4 -Wl,--start-group -lc -lgcc -lm -lnosys -Wl,--end-group

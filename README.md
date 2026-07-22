@@ -16,6 +16,68 @@ cease to be accepted by ulterior versions. Only version 1.0 will provide
 such stability, and it will be published only after publication of the
 final FN-DSA standard.
 
+**2026-07-22:** This code has been adjusted to match my *best guess* of
+what the FIPS 206 (FN-DSA) draft will contain. The public process within
+the complicated layers of red tape above NIST seems to be currently
+stuck for unclear reasons, so that nobody really knows when the draft
+will be published (presumably it *will* be published at some point,
+between now and the End of Times, but a more precise date estimate
+cannot be obtained). The guess is based what NIST announced, in
+particular at [a NIST-sponsored workshop in September
+2025](https://csrc.nist.gov/presentations/2025/fips-206-fn-dsa-falcon).
+Compared to the Falcon scheme, and to previous versions of this code,
+the following points are noteworthy:
+
+  - Encoding rules (public keys, private keys, hash-to-point sampling)
+    has been harmonized to little-endian.
+
+  - Public keys are now in NTT format (original Falcon used plain format
+    so as to leave room for alternate NTT implementations or for non-NTT
+    computations, but in practice the usual "bit-reversal" NTT is just
+    too convenient and there is little point to using anything else).
+
+  - Maximum infinity norm of signatures is now set to 840 (a suggestion
+    from Yang Yu; it apparently helps with some security proofs), down
+    from the previous limit of 2047 (which was needed for encoding format
+    reasons).
+
+  - An intermediate "mu" value (64 bytes) is computed from the input, with
+    the same method as in ML-DSA. This covers both "raw" and "pre-hashed"
+    variants, and supports "external mu" hashing for people who like that
+    kind of thing.
+
+  - A hash of the public key (using SHAKE256, with a 64-byte output) is
+    included in the "mu" computation. This hash value is now part of the
+    private key storage format; which is thus enlarged by 64 bytes (it
+    is conceptually possible to recompute the public key and then its
+    hash from the other private key fields, but the interchange format
+    for private keys must now include the hash).
+
+  - All internal seeds are harmonized to 40 bytes (except the keygen
+    seed, which is at 32 bytes). When signing, a new 40-byte seed is
+    generated for each attempt (this is inexpensive now that an
+    intermediate "mu" is computed, and it [helps with security
+    proofs](https://eprint.iacr.org/2024/1769)).
+
+  - The base sampler (in the Gaussian sampling) now uses 79 bits of
+    randomness instead of 72 (since an extra bit is needed for the sign,
+    the base sampler already used 10 byte from the PRNG, so this merely
+    uses the 7 extra bits instead of discarding them).
+
+  - The "SHAKE256x4" optional support was removed (it provided only
+    marginal speed benefits, and only for platforms with AVX2, while
+    breaking test vector reproducibility).
+
+  - Some improvements to keygen were imported from [eprint
+    2025/1239](https://eprint.iacr.org/2025/1239), making keygen a bit
+    faster and reducing RAM usage.
+
+If I guessed right then this code *might* perfectly align with the future
+FIPS 206 and would then not need any further adjustment, but no such
+guarantee can be offered (in fact, the future FIPS 206 draft will be a
+*draft* precisely because extra modification might be included into the
+final FIPS 206).
+
 This implementation is the C variant of the [Rust
 implementation](https://github.com/pornin/rust-fn-dsa/). It is
 interoperable (indeed, it reproduces the same test vectors) and mostly

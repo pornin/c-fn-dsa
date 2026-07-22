@@ -10,11 +10,8 @@
       signature buffer is large enough to receive the result
       tmp is large enough (but not necessarily aligned)  */
 static size_t
-sign_step1(unsigned logn, const uint8_t *sign_key,
-	const uint8_t *ctx, size_t ctx_len,
-	const char *id, const uint8_t *hv, size_t hv_len,
-	const uint8_t *seed, size_t seed_len,
-	uint8_t *sig, void *tmp)
+sign_step1(unsigned logn, const uint8_t *sign_key, const uint8_t *mu,
+	const uint8_t *seed, size_t seed_len, uint8_t *sig, void *tmp)
 {
 	size_t n = (size_t)1 << logn;
 
@@ -87,35 +84,49 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 		/* coefficients of G are out-of-range */
 		return 0;
 	}
-	/* t0 contains h (in ntt representation), we encode and hash
-	   the verifying key.
-	   TODO: if the original Falcon mode is retained, then we can
-	   skip both encoding and hashing. */
-	mqpoly_ntt_to_int(logn, t0);
-	mqpoly_int_to_ext(logn, t0);
-	uint8_t *vrfy_key = (uint8_t *)t1;
-	vrfy_key[0] = 0x00 + logn;
-	mqpoly_encode(logn, t0, vrfy_key + 1);
 
-	/* We can use t0 for the SHAKE256 context. The tmp buffer currently
-	   starts with t1 (2*n bytes), which contains the encoded public
-	   key (no more than 2*n bytes), leaging 56*n bytes until the
-	   storage place for G (at tmp + 58*n). With n >= 4, this is at
-	   least 224 bytes; the SHAKE context uses 208 bytes. Moreover,
-	   tmp + 2*n is at least 8-byte aligned. */
-	uint8_t hashed_key[64];
-	shake_context *sc = (shake_context *)t0;
+	/* Note: at this point we have h (in NTT representation); we could
+	   use it to encode, then recompute the verifying key hash. This
+	   is not mandated by FIPS 206, though; the signing key is assumed
+	   to be internally consistent. */
+
+	uint8_t seedbuf[40];
+
+	/* For hedging support, we need the hash of the private key. We
+	   can use tmp for the SHAKE256 context (tmp has size at least 232
+	   bytes, while a shake_context structure is 208 bytes, and tmp
+	   is suitably aligned). */
+	shake_context *sc = (shake_context *)tmp;
 	shake_init(sc, 256);
-	shake_inject(sc, vrfy_key, FNDSA_VRFY_KEY_SIZE(logn));
+	shake_inject(sc, sign_key + 1, nbits << (logn - 2));
 	shake_flip(sc);
-	shake_extract(sc, hashed_key, sizeof hashed_key);
+	shake_extract(sc, seedbuf, sizeof seedbuf);
+
+	/* The derived seed is obtained as:
+	     SHAKE256(SHAKE256(f||g)[40] || mu || seed)[40]
+	   We already have SHAKE256(f||g)[40] in seedbuf[]. */
+	shake_init(sc, 256);
+	shake_inject(sc, seedbuf, sizeof seedbuf);
+	shake_inject(sc, mu, 64);
+
+	/* We need some entropy. If none was provided, then we use the
+	   system RNG. */
+	if (seed == NULL) {
+		if (!sysrng(seedbuf, sizeof seedbuf)) {
+			return 0;
+		}
+		seed = seedbuf;
+		seed_len = sizeof seedbuf;
+	}
+	shake_inject(sc, seed, seed_len);
+	shake_flip(sc);
+	shake_extract(sc, seedbuf, sizeof seedbuf);
 
 	/* We now have G, and we checked that f, g and F can be decoded
-	   successfully (no out-of-range element). Hashed public key is in
-	   hashed_key[]. We can proceed to the main signing loop. */
-	return sign_core(logn, sign_key + 1, G, hashed_key,
-		ctx, ctx_len, id, hv, hv_len,
-		seed, seed_len, sig, tmp);
+	   successfully (no out-of-range element). We have a 40-byte seed.
+	   We can proceed to the main signing loop. */
+	return sign_core(logn, sign_key + 1, G, mu,
+		seedbuf, sizeof seedbuf, sig, tmp);
 
 	/* TODO: maybe explicitly overwrite the whole temporary area with
 	   zeros? Arguably this is mostly wasted time if the area is
@@ -127,17 +138,14 @@ sign_step1(unsigned logn, const uint8_t *sign_key,
 /* Custom wrappers to allocate the temporary buffers on the stack. Several
    wrappers are defined so that stack allocation is not always worst-case. */
 #define SIGN_WRAP(sz)   \
-	static size_t sign_ ## sz(unsigned logn, \
-		const uint8_t *sign_key, \
-		const uint8_t *ctx, size_t ctx_len, \
-		const char *id, const uint8_t *hv, size_t hv_len, \
+	NOINLINE static size_t sign_ ## sz(unsigned logn, \
+		const uint8_t *sign_key, const uint8_t *mu, \
 		const uint8_t *seed, size_t seed_len, \
 		uint8_t *sig) \
 	{ \
 		uint8_t tmp[(sz) * 59 + 31]; \
 		return sign_step1(logn, \
-			sign_key, ctx, ctx_len, id, hv, hv_len, \
-			seed, seed_len, sig, tmp); \
+			sign_key, mu, seed, seed_len, sig, tmp); \
 	}
 
 SIGN_WRAP(32)
@@ -185,41 +193,52 @@ sign_wrapper(int weak,
 	}
 
 	/* We have checked that the degree is acceptable, the signing key
-	   size is correct, and the signature will fit in the output buffer. */
+	   size is correct, and the signature will fit in the output buffer.
+	   We compute the message representative mu. */
+	uint8_t mu[64];
+	if (id != NULL && *(const uint8_t *)id == 0xFE) {
+		/* External mu mode. */
+		if (hv_len != 64) {
+			return 0;
+		}
+		memcpy(mu, hv, hv_len);
+	} else {
+		if (!fndsa_compute_mu(mu,
+			fndsa_hashed_vrfykey_from_signkey(
+				sign_key, sign_key_len),
+			ctx, ctx_len, id, hv, hv_len))
+		{
+			return 0;
+		}
+	}
+
 	if (tmp == NULL) {
 		switch (logn) {
 		case 6:
 			return sign_64(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		case 7:
 			return sign_128(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		case 8:
 			return sign_256(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		case 9:
 			return sign_512(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		case 10:
 			return sign_1024(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		default:
 			return sign_32(logn,
-				sign_key, ctx, ctx_len, id, hv, hv_len,
-				seed, seed_len, sig);
+				sign_key, mu, seed, seed_len, sig);
 		}
 	} else {
 		if (tmp_len < (((size_t)59 << logn) + 31)) {
 			return 0;
 		}
 		return sign_step1(logn,
-			sign_key, ctx, ctx_len, id, hv, hv_len,
-			seed, seed_len, sig, tmp);
+			sign_key, mu, seed, seed_len, sig, tmp);
 	}
 }
 

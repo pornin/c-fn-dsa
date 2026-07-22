@@ -55,80 +55,63 @@ static const fpr_u SIGMA_MIN[] = {
 	{ FPR(5846934829975396, -52) }    /* 1.2982803343442918540 */
 };
 
-#if !FNDSA_ASM_CORTEXM4
-/* Distribution for gaussian0() (this is the RCDT table from the
-   specification, expressed in base 2^24). */
-static const uint32_t GAUSS0[][3] = {
-	{ 10745844,  3068844,  3741698 },
-	{  5559083,  1580863,  8248194 },
-	{  2260429, 13669192,  2736639 },
-	{   708981,  4421575, 10046180 },
-	{   169348,  7122675,  4136815 },
-	{    30538, 13063405,  7650655 },
-	{     4132, 14505003,  7826148 },
-	{      417, 16768101, 11363290 },
-	{       31,  8444042,  8086568 },
-	{        1, 12844466,   265321 },
-	{        0,  1232676, 13644283 },
-	{        0,    38047,  9111839 },
-	{        0,      870,  6138264 },
-	{        0,       14, 12545723 },
-	{        0,        0,  3104126 },
-	{        0,        0,    28824 },
-	{        0,        0,      198 },
-	{        0,        0,        1 }
-};
-#endif
-
 /* log(2) */
 #define LOG2   FPR(6243314768165359, -53)
 
 /* 1/log(2) */
 #define INV_LOG2   FPR(6497320848556798, -52)
 
-/* We access the PRNG through macros so that they can be overridden by some
-   compatiblity tests with the original Falcon implementation. */
+/* We access the PRNG through macros so that they can be overridden at
+   compile-time by some internal test routine. */
 #ifndef prng_init
-#if FNDSA_SHAKE256X4
-#define prng_init       shake256x4_init
-#define prng_next_u8    shake256x4_next_u8
-#define prng_next_u64   shake256x4_next_u64
-#else
 #define prng_init(pc, seed, seed_len)   do { \
 		shake_init(pc, 256); \
 		shake_inject(pc, seed, seed_len); \
 		shake_flip(pc); \
 	} while (0)
 #define prng_next_u8    shake_next_u8
+#define prng_next_u16   shake_next_u16
 #define prng_next_u64   shake_next_u64
 #endif
-#endif
 
-/* see sign_inner.h */
-void
-sampler_init(sampler_state *ss, unsigned logn,
-	const void *seed, size_t seed_len)
-{
-	prng_init(&ss->pc, seed, seed_len);
-	ss->logn = logn;
-}
-
+/* fndsa_gaussian0_helper() performs the sampling for the half-Gaussian,
+   using (lo >> 1) | (hi << 63) as look-up value (79 bits; low bit of lo
+   is ignored). */
 #if FNDSA_ASM_CORTEXM4
 int32_t fndsa_gaussian0_helper(uint64_t lo, uint32_t hi);
-#endif
-
-static inline int32_t
-gaussian0(sampler_state *ss)
-{
-	/* Get a random 72-bit value, into three 24-bit limbs (v0..v2). */
-	uint64_t lo = prng_next_u64(&ss->pc);
-	uint32_t hi = prng_next_u8(&ss->pc);
-#if FNDSA_ASM_CORTEXM4
-	return fndsa_gaussian0_helper(lo, hi);
 #else
-	uint32_t v0 = (uint32_t)lo & 0xFFFFFF;
-	uint32_t v1 = (uint32_t)(lo >> 24) & 0xFFFFFF;
-	uint32_t v2 = (uint32_t)(lo >> 48) | (hi << 16);
+static inline int32_t
+fndsa_gaussian0_helper(uint64_t lo, uint32_t hi)
+{
+	/* Values from Table 5 (Distribution for BaseSampler), split into
+	   three chunks of 31, 24 and 24 bits, in high-to-low order,
+	   respectively. */
+	static const uint32_t GAUSS0[][3] = {
+		{ 1375468055,  6936092,  9176346 },
+		{  711562636,  1023934, 15582455 },
+		{  289335016,  4826132, 14746371 },
+		{   90749601, 12313548, 10843417 },
+		{   21676598,  5732767,  9419414 },
+		{    3908963, 11171514,  6206010 },
+		{     529006, 11146683, 11891888 },
+		{      53503, 15610582, 11661180 },
+		{       4032,  7095613, 11671091 },
+		{        225, 16701698,   407118 },
+		{          9,  6787688,  1638204 },
+		{          0,  4870085,  8687822 },
+		{          0,   111406, 13946073 },
+		{          0,     1887, 12017202 },
+		{          0,       23, 11452285 },
+		{          0,        0,  3689579 },
+		{          0,        0,    25354 },
+		{          0,        0,      129 }
+	};
+
+	/* Split the 79-bit value into three words of 24, 24 and 31 bits
+	   (in low-to-high order). */
+	uint32_t v0 = ((uint32_t)lo >> 1) & 0x00FFFFFF;
+	uint32_t v1 = (uint32_t)(lo >> 25) & 0x00FFFFFF;
+	uint32_t v2 = (uint32_t)(lo >> 49) | (hi << 15);
 
 	/* Sampled value is z such that v0..v2 is lower than the first
 	   z elements of the table. */
@@ -141,8 +124,15 @@ gaussian0(sampler_state *ss)
 		z += (int32_t)cc;
 	}
 	return z;
-#endif
 }
+#endif
+
+#define GAUSSIAN(ss, z0, b)   do { \
+		uint64_t lo = prng_next_u64(&ss->pc); \
+		uint32_t hi = prng_next_u16(&ss->pc); \
+		(b) = (uint32_t)lo & 1; \
+		(z0) = fndsa_gaussian0_helper(lo, hi); \
+	} while (0)
 
 #if FNDSA_SSE2
 /* ========================= SSE2 IMPLEMENTATION ========================= */
@@ -216,6 +206,7 @@ expm_p63(__m128d x, __m128d ccs)
 	uint64_t y = EXPM_COEFFS[0];
 	uint64_t z = (uint64_t)mtwop63(x) << 1;
 	uint64_t w = (uint64_t)mtwop63(ccs) << 1;
+	/* sigma_min is not tight, so ccs < 1 and w is not truncated to 0 */
 #if FNDSA_64
 	/* On 64-bit x86, we have 64x64->128 multiplication, then we can use
 	   it, it's normally constant-time.
@@ -315,10 +306,34 @@ ber_exp(sampler_state *ss, __m128d x, __m128d ccs)
 	return 0;
 }
 
+#if 0
+/* disabled code for one-time gathering of test vectors */
+fpr KAT_SAMPLER_mu[1024];
+fpr KAT_SAMPLER_isigma[1024];
+int16_t KAT_SAMPLER_out[1024];
+size_t KAT_SAMPLER_ptr = 0;
+#endif
+
 TARGET_SSE2
 static int32_t
 sampler_next_sse2(sampler_state *ss, __m128d mu, __m128d isigma)
 {
+#if 0
+/* disabled code for one-time gathering of test vectors */
+	if (KAT_SAMPLER_ptr >= 1024) {
+		extern void exid(int);
+		exit(43);
+	}
+	union {
+		double d;
+		fpr f;
+	} KAT_SAMPLER_t;
+	_mm_store_sd(&KAT_SAMPLER_t.d, mu);
+	KAT_SAMPLER_mu[KAT_SAMPLER_ptr] = KAT_SAMPLER_t.f;
+	_mm_store_sd(&KAT_SAMPLER_t.d, isigma);
+	KAT_SAMPLER_isigma[KAT_SAMPLER_ptr] = KAT_SAMPLER_t.f;
+#endif
+
 	static union { fpr f[2]; __m128d x; }
 		HALF_u = { {
 			FPR(4503599627370496, -53),
@@ -336,7 +351,7 @@ sampler_next_sse2(sampler_state *ss, __m128d mu, __m128d isigma)
 	/* dss = 1/(2*sigma^2) = 0.5*(isigma^2)  */
 	__m128d dss = _mm_mul_sd(_mm_mul_sd(isigma, isigma), HALF_u.x);
 
-	/* css = sigma_min / sigma = sigma_min * isigma  */
+	/* ccs = sigma_min / sigma = sigma_min * isigma  */
 	__m128d ccs = _mm_mul_sd(isigma,
 		_mm_load_sd((const double *)SIGMA_MIN + ss->logn));
 
@@ -346,8 +361,8 @@ sampler_next_sse2(sampler_state *ss, __m128d mu, __m128d isigma)
 		   then get a random bit b to turn the sampling into a
 		   bimodal distribution (we use z+1 if b = 1, or -z
 		   otherwise). */
-		int32_t z0 = gaussian0(ss);
-		int32_t b = prng_next_u8(&ss->pc) & 1;
+		int32_t z0, b;
+		GAUSSIAN(ss, z0, b);
 		int32_t z = b + ((b << 1) - 1) * z0;
 
 		/* Rejection sampling. We want a Gaussian centred on r,
@@ -380,6 +395,9 @@ sampler_next_sse2(sampler_state *ss, __m128d mu, __m128d isigma)
 			_mm_cvtsi32_sd(_mm_setzero_pd(), z0 * z0),
 			INV_2SQRSIGMA0_u.x));
 		if (ber_exp(ss, x, ccs)) {
+			/* disabled one-time test vector gathering code
+			KAT_SAMPLER_out[KAT_SAMPLER_ptr ++] = s + z;
+			*/
 			return s + z;
 		}
 	}
@@ -438,6 +456,7 @@ expm_p63(float64x1_t x, float64x1_t ccs)
 	uint64_t y = EXPM_COEFFS[0];
 	uint64_t z = (uint64_t)mtwop63(x) << 1;
 	uint64_t w = (uint64_t)mtwop63(ccs) << 1;
+	/* sigma_min is not tight, so ccs < 1 and w is not truncated to 0 */
 
 	/* We assume here that 64x64->128 multiplications are constant-time,
 	   which is not exactly true on some aarch64 systems (e.g. ARM
@@ -530,7 +549,7 @@ sampler_next_neon(sampler_state *ss, float64x1_t mu, float64x1_t isigma)
 	/* dss = 1/(2*sigma^2) = 0.5*(isigma^2)  */
 	float64x1_t dss = vmul_f64(vmul_f64(isigma, isigma), HALF_u.v);
 
-	/* css = sigma_min / sigma = sigma_min * isigma  */
+	/* ccs = sigma_min / sigma = sigma_min * isigma  */
 	float64x1_t ccs = vmul_f64(isigma, SIGMA_MIN[ss->logn].v);
 
 	/* We sample on centre r. */
@@ -539,8 +558,8 @@ sampler_next_neon(sampler_state *ss, float64x1_t mu, float64x1_t isigma)
 		   then get a random bit b to turn the sampling into a
 		   bimodal distribution (we use z+1 if b = 1, or -z
 		   otherwise). */
-		int32_t z0 = gaussian0(ss);
-		int32_t b = prng_next_u8(&ss->pc) & 1;
+		int32_t z0, b;
+		GAUSSIAN(ss, z0, b);
 		int32_t z = b + ((b << 1) - 1) * z0;
 
 		/* Rejection sampling. We want a Gaussian centred on r,
@@ -593,7 +612,6 @@ sampler_next(sampler_state *ss, fpr mu, fpr isigma)
 
 /* Input: 0 <= x < log(2)
    Output: trunc(x*2^63) */
-TARGET_NEON
 static inline int64_t
 mtwop63(f64 x)
 {
@@ -628,6 +646,7 @@ expm_p63(f64 x, f64 ccs)
 	uint64_t y = EXPM_COEFFS[0];
 	uint64_t z = (uint64_t)mtwop63(x) << 1;
 	uint64_t w = (uint64_t)mtwop63(ccs) << 1;
+	/* sigma_min is not tight, so ccs < 1 and w is not truncated to 0 */
 
 	/* We assume here that 64x64->128 multiplications are constant-time
 	   and that the compiler is GCC/Clang compatible (i.e. supports
@@ -702,7 +721,7 @@ sampler_next_rv64d(sampler_state *ss, f64 mu, f64 isigma)
 	/* dss = 1/(2*sigma^2) = 0.5*(isigma^2)  */
 	f64 dss = f64_half(f64_sqr(isigma));
 
-	/* css = sigma_min / sigma = sigma_min * isigma  */
+	/* ccs = sigma_min / sigma = sigma_min * isigma  */
 	f64 ccs = f64_mul(isigma, SIGMA_MIN[ss->logn].v);
 
 	/* We sample on centre r. */
@@ -711,8 +730,8 @@ sampler_next_rv64d(sampler_state *ss, f64 mu, f64 isigma)
 		   then get a random bit b to turn the sampling into a
 		   bimodal distribution (we use z+1 if b = 1, or -z
 		   otherwise). */
-		int32_t z0 = gaussian0(ss);
-		int32_t b = prng_next_u8(&ss->pc) & 1;
+		int32_t z0, b;
+		GAUSSIAN(ss, z0, b);
 		int32_t z = b + ((b << 1) - 1) * z0;
 
 		/* Rejection sampling. We want a Gaussian centred on r,
@@ -820,6 +839,7 @@ expm_p63(fpr x, fpr ccs)
 	/* The scaling factor must be applied at the end. Since y is now
 	   in fixed-point notation, we have to convert the factor to the
 	   same format, and we do an extra integer multiplication. */
+	/* sigma_min is not tight, so ccs < 1 and w is not truncated to 0 */
 	uint64_t w = (uint64_t)fpr_trunc(fpr_mul2e(ccs, 63)) << 1;
 	uint32_t w0 = (uint32_t)w, w1 = (uint32_t)(w >> 32);
 	uint32_t y0 = (uint32_t)y, y1 = (uint32_t)(y >> 32);
@@ -902,7 +922,7 @@ sampler_next(sampler_state *ss, fpr mu, fpr isigma)
 	/* dss = 1/(2*sigma^2) = 0.5*(isigma^2)  */
 	fpr dss = fpr_half(fpr_sqr(isigma));
 
-	/* css = sigma_min / sigma = sigma_min * isigma  */
+	/* ccs = sigma_min / sigma = sigma_min * isigma  */
 	fpr ccs = fpr_mul(isigma, SIGMA_MIN[ss->logn].f);
 
 	/* We sample on centre r. */
@@ -911,8 +931,8 @@ sampler_next(sampler_state *ss, fpr mu, fpr isigma)
 		   then get a random bit b to turn the sampling into a
 		   bimodal distribution (we use z+1 if b = 1, or -z
 		   otherwise). */
-		int32_t z0 = gaussian0(ss);
-		int32_t b = prng_next_u8(&ss->pc) & 1;
+		int32_t z0, b;
+		GAUSSIAN(ss, z0, b);
 		int32_t z = b + ((b << 1) - 1) * z0;
 
 		/* Rejection sampling. We want a Gaussian centred on r,

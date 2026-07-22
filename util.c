@@ -7,49 +7,12 @@
 /* see inner.h */
 void
 hash_to_point(unsigned logn,
-        const uint8_t *nonce, const uint8_t *hashed_vrfy_key,
-        const void *ctx, size_t ctx_len,
-        const char *hash_id, const void *hv, size_t hv_len,
-        uint16_t *c)
+        const uint8_t *nonce, const uint8_t *mu, uint16_t *c)
 {
-	/*
-	 * If hash_id starts with a single byte of value 0xFF then we
-	 * use the original Falcon mode (TODO: remove this feature, it
-	 * is obsolescent).
-	 *
-	 * Raw message:
-	 *   nonce || hashed_vrfy_key || 0x00 || len(ctx) || ctx || message
-	 * Pre-hashed message:
-	 *   nonce || hashed_vrfy_key || 0x01 || len(ctx) || ctx || id || hv
-	 * Original Falcon:
-	 *   nonce || message
-	 */
 	shake_context sc;
 	shake_init(&sc, 256);
 	shake_inject(&sc, nonce, 40);
-	if (*(const uint8_t *)hash_id == 0xFF) {
-		/* Original Falcon mode */
-		shake_inject(&sc, hv, hv_len);
-	} else {
-		shake_inject(&sc, hashed_vrfy_key, 64);
-		uint8_t hb[2];
-		size_t id_len;
-		if (hash_id[0] == 0x00) {
-			/* Raw message, no pre-hashing */
-			hb[0] = 0x00;
-			id_len = 0;
-		} else {
-			/* Pre-hashing.
-			   ID is ASN.1 OID: 0x06 len value */
-			hb[0] = 0x01;
-			id_len = hash_id[1] + 2;
-		}
-		hb[1] = ctx_len;
-		shake_inject(&sc, &hb, 2);
-		shake_inject(&sc, ctx, ctx_len);
-		shake_inject(&sc, hash_id, id_len);
-		shake_inject(&sc, hv, hv_len);
-	}
+	shake_inject(&sc, mu, 64);
 	shake_flip(&sc);
 
 	size_t n = (size_t)1 << logn;
@@ -70,7 +33,7 @@ hash_to_point(unsigned logn,
 #endif
 			j = 0;
 		}
-		unsigned w = ((unsigned)sbuf[j] << 8) | sbuf[j + 1];
+		unsigned w = sbuf[j] | ((unsigned)sbuf[j + 1] << 8);
 		j += 2;
 		if (w < 61445) {
 			while (w >= 12289) {
@@ -123,3 +86,96 @@ has_avx2(void)
 #error Missing has_avx2() implementation (not GCC/Clang/MSVC)
 #endif
 #endif
+
+/* see fndsa.h */
+void
+fndsa_hashed_vrfykey_from_vrfykey(void *hashed_vkey,
+	const void *vrfy_key, size_t vrfy_key_len)
+{
+	shake_context sc;
+	shake_init(&sc, 256);
+	shake_inject(&sc, vrfy_key, vrfy_key_len);
+	shake_flip(&sc);
+	shake_extract(&sc, hashed_vkey, 64);
+}
+
+/* see fndsa.h */
+int
+fndsa_compute_mu(void *mu, const void *hashed_vkey,
+	const void *ctx, size_t ctx_len,
+	const char *id, const void *hv, size_t hv_len)
+{
+	if (hashed_vkey == NULL) {
+		return 0;
+	}
+	if ((ctx == NULL && ctx_len != 0) || ctx_len > 255) {
+		return 0;
+	}
+	if (id == NULL) {
+		id = FNDSA_HASH_ID_RAW;
+	}
+
+	shake_context sc;
+	shake_init(&sc, 256);
+	shake_inject(&sc, hashed_vkey, 64);
+	const uint8_t *id_u = (const uint8_t *)id;
+	size_t id_len;
+
+	/* Header byte: 0x00 for raw, 0x01 for pre-hashed. */
+	uint8_t xb;
+	switch (id_u[0]) {
+	case 0x00:
+		/* Raw message. */
+		xb = 0;
+		shake_inject(&sc, &xb, 1);
+		id_len = 0;
+		break;
+	case 0x06:
+		/* Pre-hashed message. id is a DER-encoded OID; first
+		   byte is the tag (0x06), second byte should be the
+		   length (we tolerate only lengths up to 127, which is
+		   more than enough for normal OIDs). */
+		id_len = id_u[1];
+		if (id_len > 127) {
+			return 0;
+		}
+		id_len += 2;  /* for tag and length */
+		xb = 1;
+		shake_inject(&sc, &xb, 1);
+		break;
+	default:
+		/* Other values are invalid, including the "external mu"
+		   identifier, which cannot be used for this function. */
+		return 0;
+	}
+
+	xb = (uint8_t)ctx_len;
+	shake_inject(&sc, &xb, 1);
+	shake_inject(&sc, ctx, ctx_len);
+	shake_inject(&sc, id, id_len);
+	shake_inject(&sc, hv, hv_len);
+	shake_flip(&sc);
+	shake_extract(&sc, mu, 64);
+	return 1;
+}
+
+/* see fndsa.h */
+int
+fndsa_compute_mu_start(const void *hashed_vkey,
+	const void *ctx, size_t ctx_len,
+	void (*shake_cb)(void *state, const uint8_t *data, size_t data_len),
+	void *shake_cb_state)
+{
+	if ((ctx == NULL && ctx_len != 0) || ctx_len > 255) {
+		return 0;
+	}
+	shake_cb(shake_cb_state, hashed_vkey, 64);
+	uint8_t xb = 0;
+	shake_cb(shake_cb_state, &xb, 1);
+	xb = (uint8_t)ctx_len;
+	shake_cb(shake_cb_state, &xb, 1);
+	if (ctx_len > 0) {
+		shake_cb(shake_cb_state, ctx, ctx_len);
+	}
+	return 1;
+}

@@ -1017,6 +1017,7 @@ avx2_mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp)
 }
 #endif
 
+#if 0 /* obsolete */
 /* see inner.h */
 void
 mqpoly_div_small(unsigned logn, const int8_t *g, const int8_t *f,
@@ -1046,11 +1047,12 @@ avx2_mqpoly_div_small(unsigned logn, const int8_t *g, const int8_t *f,
 	avx2_mqpoly_int_to_ext(logn, h);
 }
 #endif
+#endif
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
 uint32_t
-mqpoly_sqnorm_int(unsigned logn, const uint16_t *a)
+mqpoly_sqnorm_binf_int(unsigned logn, const uint16_t *a)
 {
 	/*
 	 * The normalized values are at most (q-1)/2 in absolute value,
@@ -1067,6 +1069,8 @@ mqpoly_sqnorm_int(unsigned logn, const uint16_t *a)
 		int32_t y = *(int32_t *)&x;
 		s += (uint32_t)(y * y);
 		sat |= s;
+		sat |= (uint32_t)(B_INF - y);
+		sat |= (uint32_t)(B_INF + y);
 	}
 	s |= -(sat >> 31);
 	return s;
@@ -1103,7 +1107,7 @@ mqpoly_sqnorm_int_to_signed(unsigned logn, uint16_t *a)
 #if FNDSA_AVX2
 TARGET_AVX2
 uint32_t
-avx2_mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a)
+avx2_mqpoly_sqnorm_binf_ext(unsigned logn, const uint16_t *a)
 {
 	if (logn >= 4) {
 		const __m256i *ap = (const __m256i *)a;
@@ -1111,12 +1115,21 @@ avx2_mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a)
 		__m256i ysat = _mm256_setzero_si256();
 		__m256i qq = _mm256_set1_epi16(Q);
 		__m256i hq = _mm256_set1_epi16((Q - 1) >> 1);
+		__m256i bbp = _mm256_set1_epi16(B_INF);
+		__m256i bbm = _mm256_set1_epi16(-B_INF);
+		__m256i ylif = _mm256_setzero_si256();
 		for (size_t i = 0; i < (1u << (logn - 4)); i ++) {
 			__m256i y = _mm256_loadu_si256(ap + i);
 
 			/* Normalize to [-q/2,+q/2]. */
 			__m256i ym = _mm256_cmpgt_epi16(y, hq);
 			y = _mm256_sub_epi16(y, _mm256_and_si256(ym, qq));
+
+			/* If the value is outside of [-B_INF,+B_INF],
+			   some bits of ylif will be set to 1. */
+			ylif = _mm256_or_si256(ylif, _mm256_or_si256(
+				_mm256_cmpgt_epi16(y, bbp),
+				_mm256_cmpgt_epi16(bbm, y)));
 
 			/* Compute and add coefficient squares. */
 			__m256i ylo = _mm256_mullo_epi16(y, y);
@@ -1136,8 +1149,13 @@ avx2_mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a)
 			ysat = _mm256_or_si256(ysat, ys);
 		}
 
+		/* Merge the L-infinity failure bits into the overflow
+		   bits in ysat. */
+		ylif = _mm256_or_si256(ylif, _mm256_slli_epi32(ylif, 16));
+		ysat = _mm256_or_si256(ysat, ylif);
+
 		/* Finish the addition. We saturate to 2^32-1 if any of
-		   the overflow bits was set. */
+		   the overflow of L-infinity bits was set. */
 		ys = _mm256_add_epi32(ys, _mm256_srli_epi64(ys, 32));
 		ysat = _mm256_or_si256(ysat, ys);
 		ys = _mm256_add_epi32(ys, _mm256_bsrli_epi128(ys, 8));
@@ -1160,6 +1178,9 @@ avx2_mqpoly_sqnorm_ext(unsigned logn, const uint16_t *a)
 			int32_t y = *(int32_t *)&x;
 			s += (uint32_t)(y * y);
 			sat |= s;
+			/* Also check L-infinity norm. */
+			sat |= (uint32_t)(B_INF - y);
+			sat |= (uint32_t)(B_INF + y);
 		}
 		s |= -(sat >> 31);
 		return s;

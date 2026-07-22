@@ -15,35 +15,59 @@
 fndsa_gaussian0_helper:
 	push.w	{ r4, r5, r6, r7, r8, r10 }
 
+	@ Right-shift value by 1 bit (bit 0 is ignored).
+	lsrs.w	r2, r2, #1
+	rrxs	r1, r1
+	rrxs	r0, r0
+
 	adr.w	r12, fndsa_gaussian0_helper__gauss0_low
 
 	@ 0 and 1
 	ldm	r12!, { r4, r5, r6, r7 }
 	subs	r8, r0, r4
 	sbcs	r8, r1, r5
-	sbcs	r8, r2, #163  @ high[0]
+	movw	r4, #20987    @ high[0]
+	sbcs	r8, r2, r4
 	lsr.w	r3, r8, #31
 	subs	r8, r0, r6
 	sbcs	r8, r1, r7
-	sbcs	r8, r2, #84   @ high[1]
+	movw	r4, #10857    @ high[1]
+	sbcs	r8, r2, r4
 	add.w	r3, r3, r8, lsr #31
 
 	@ 2 and 3
 	ldm	r12!, { r4, r5, r6, r7 }
 	subs	r8, r0, r4
 	sbcs	r8, r1, r5
-	sbcs	r8, r2, #34   @ high[2]
+	movw	r4, #4414     @ high[2]
+	sbcs	r8, r2, r4
 	add.w	r3, r3, r8, lsr #31
 	subs	r8, r0, r6
 	sbcs	r8, r1, r7
-	sbcs	r8, r2, #10   @ high[3]
+	movw	r4, #1384     @ high[3]
+	sbcs	r8, r2, r4
 	add.w	r3, r3, r8, lsr #31
 
 	@ 4 and 5
 	ldm	r12!, { r4, r5, r6, r7 }
 	subs	r8, r0, r4
 	sbcs	r8, r1, r5
-	sbcs	r8, r2, #2    @ high[4]
+	sbcs	r8, r2, #330  @ high[4]
+	add.w	r3, r3, r8, lsr #31
+	subs	r8, r0, r6
+	sbcs	r8, r1, r7
+	sbcs	r8, r2, #59   @ high[5]
+	add.w	r3, r3, r8, lsr #31
+
+	@ 6 and 7
+	ldm	r12!, { r4, r5, r6, r7 }
+	subs	r8, r0, r4
+	sbcs	r8, r1, r5
+	sbcs	r8, r2, #8    @ high[6]
+	add.w	r3, r3, r8, lsr #31
+	subs	r8, r0, r6
+	sbcs	r8, r1, r7
+	sbcs	r8, r2, #0    @ high[7]
 	add.w	r3, r3, r8, lsr #31
 
 	@ Subsequent values are less than 2^63, thus they can modify the
@@ -52,22 +76,6 @@ fndsa_gaussian0_helper:
 	@ operations, but omitting the third subtraction, and accumulating
 	@ bits into r10.
 	movw	r10, #0
-
-	subs	r8, r0, r6
-	sbcs	r8, r1, r7
-	@sbcs	r8, r2, #0    @ high[5]
-	add.w	r10, r10, r8, lsr #31
-
-	@ 6 and 7
-	ldm	r12!, { r4, r5, r6, r7 }
-	subs	r8, r0, r4
-	sbcs	r8, r1, r5
-	@sbcs	r8, r2, #0    @ high[6]
-	add.w	r10, r10, r8, lsr #31
-	subs	r8, r0, r6
-	sbcs	r8, r1, r7
-	@sbcs	r8, r2, #0    @ high[7]
-	add.w	r10, r10, r8, lsr #31
 
 	@ 8 and 9
 	ldm	r12!, { r4, r5, r6, r7 }
@@ -80,45 +88,45 @@ fndsa_gaussian0_helper:
 	@sbcs	r8, r2, #0    @ high[9]
 	add.w	r10, r10, r8, lsr #31
 
-	@ 10, 11 and 12
+	@ 10 and 11
 	ldm	r12!, { r4, r5, r6, r7 }
 	subs	r8, r0, r4
 	sbcs	r8, r1, r5
 	@sbcs	r8, r2, #0    @ high[10]
 	add.w	r10, r10, r8, lsr #31
 	subs	r8, r0, r6
-	sbcs	r8, r1, #148  @ mid[11]
+	sbcs	r8, r1, r7
 	@sbcs	r8, r2, #0    @ high[11]
 	add.w	r10, r10, r8, lsr #31
-	subs	r8, r0, r7
-	sbcs	r8, r1, #3    @ mid[12]
-	@sbcs	r8, r2, #0    @ high[12]
-	add.w	r10, r10, r8, lsr #31
 
-	@ 13, 14, 15, 16
+	@ 12, 13 and 14
 	ldm	r12!, { r4, r5, r6, r7 }
 	subs	r8, r0, r4
-	sbcs	r8, r1, #0    @ mid[13]
+	sbcs	r8, r1, r5
+	@sbcs	r8, r2, #0    @ high[12]
+	add.w	r10, r10, r8, lsr #31
+	subs	r8, r0, r6
+	sbcs	r8, r1, #7    @ mid[13]
 	@sbcs	r8, r2, #0    @ high[13]
 	add.w	r10, r10, r8, lsr #31
-	subs	r8, r0, r5
+	subs	r8, r0, r7
 	sbcs	r8, r1, #0    @ mid[14]
 	@sbcs	r8, r2, #0    @ high[14]
 	add.w	r10, r10, r8, lsr #31
-	subs	r8, r0, r6
+
+	@ 15, 16 and 17
+	ldm	r12!, { r4, r5, r6 }
+	subs	r8, r0, r4
 	sbcs	r8, r1, #0    @ mid[15]
 	@sbcs	r8, r2, #0    @ high[15]
 	add.w	r10, r10, r8, lsr #31
-	subs	r8, r0, r7
+	subs	r8, r0, r5
 	sbcs	r8, r1, #0    @ mid[16]
 	@sbcs	r8, r2, #0    @ high[16]
 	add.w	r10, r10, r8, lsr #31
-
-	@ 17
-	ldr.w	r4, [r12]
-	subs	r8, r0, r4
+	subs	r8, r0, r6
 	sbcs	r8, r1, #0    @ mid[17]
-	@sbcs	r8, r2, #0    @ high[17]
+	@sbcs	r8, r2, #0    @ high[1.]
 	add.w	r10, r10, r8, lsr #31
 
 	@ Result is split into r10 and r3. If r2 != 0 or r1 >= 2^31, then
@@ -128,33 +136,33 @@ fndsa_gaussian0_helper:
 	and	r10, r10, r2, asr #31
 	add	r0, r3, r10
 
-	@mov.w	r0, r3
 	pop	{ r4, r5, r6, r7, r8, r10 }
 	bx	lr
 	.align	3
 fndsa_gaussian0_helper__gauss0_low:
-	@ This is the RCDT table from the specification. Only the low 64 bits
-	@ of each value are stored here; the high 8 bits are provided in
-	@ comments but otherwise hardcoded in the instructions above.
-	.word	2889422850, 4159975123  @ high: 163
-	.word	1065212802, 3542816799  @ high:  84
-	.word	1210696191, 2110640275  @ high:  34
-	.word	3348712164, 3514123127  @ high:  10
-	.word	4081000303, 2508483758  @ high:   2
-	.word	3983850847, 2001389396  @ high:   0
-	.word	 729246436,  270851412  @ high:   0
-	.word	1705862106,   27394012  @ high:   0
-	.word	2323342376,    2064600  @ high:   0
-	.word	2986609769,     115709  @ high:   0
-	.word	 617624059,       4815  @ high:   0
-	@ Starting at value 11, we only store the low 32 bits.
-	.word	2676689183  @ mid: 148    high:   0
-	.word	1717414296  @ mid:   3    high:   0
-	.word	 247426747  @ mid:   0    high:   0
-	.word	   3104126  @ mid:   0    high:   0
-	.word	     28824  @ mid:   0    high:   0
-	.word	       198  @ mid:   0    high:   0
-	.word	         1  @ mid:   0    high:   0
+	@ This is the SignDist[] table from the specification. Only the low
+	@ 64 bits of each value are stored here; the high 15 bits are provided
+	@ in comments but otherwise hardcoded in the instructions above.
+	.word	 478938394, 4195838422  @ high: 20987
+	.word	3203253495, 2508984223  @ high: 10857
+	.word	 350290691, 3873982884  @ high:  4414
+	.word	3433395481, 3131161571  @ high:  1384
+	.word	2676996758, 3258341241  @ high:   330
+	.word	3126768186, 2774772342  @ high:    59
+	.word	3149231280,  309242389  @ high:     8
+	.word	3601985404, 3506433586  @ high:     0
+	.word	1035081267,  264268869  @ high:     0
+	.word	  33961550,   14810841  @ high:     0
+	.word	1746468668,     616338  @ high:     0
+	.word	3313799374,      19023  @ high:     0
+	.word	 785698009,        435  @ high:     0
+	@ Starting at value 13, we only store the low 32 bits.
+	.word	1605852722  @ mid:   7    high:     0
+	.word	 397328253  @ mid:   0    high:     0
+	.word	   3689579  @ mid:   0    high:     0
+	.word	     25354  @ mid:   0    high:     0
+	.word	       129  @ mid:   0    high:     0
+
 	.size	fndsa_gaussian0_helper,.-fndsa_gaussian0_helper
 
 @ =======================================================================

@@ -104,7 +104,11 @@ static inline uint64_t
 core_cycles(void)
 {
 	_mm_lfence();
+#if defined FNDSA_TSC && FNDSA_TSC
+	return __rdtsc();
+#else
 	return __rdpmc(0x40000001);
+#endif
 }
 #elif defined __aarch64__ && (defined __GNUC__ || defined __clang__)
 static inline uint64_t
@@ -213,10 +217,11 @@ bench_verify(unsigned logn, unsigned *x)
 	for (int i = 0; i < 120; i ++) {
 		fndsa_sign_seeded(sk, FNDSA_SIGN_KEY_SIZE(logn),
 			NULL, 0, FNDSA_HASH_ID_RAW, "test", 4,
-			seed, sizeof seed, sig[i], FNDSA_SIGNATURE_SIZE(logn));
+			seed, sizeof seed,
+			sig[i], FNDSA_SIGNATURE_SIZE(logn));
 		seed[2] ++;
 	}
-	uint8_t msg[4] = "test";
+	uint8_t msg[5] = "test";
 	for (int i = 0; i < 120; i ++) {
 		uint64_t begin = core_cycles();
 		int r = fndsa_verify(sig[i], FNDSA_SIGNATURE_SIZE(logn),

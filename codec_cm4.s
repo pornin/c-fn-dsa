@@ -4,6 +4,7 @@
 	.text
 
 	.equ	Q, 12289
+	.equ	B_INF, 840
 
 @ =======================================================================
 @ size_t fndsa_mqpoly_decode(unsigned logn, const uint8_t *f, uint16_t *h)
@@ -15,7 +16,7 @@
 	.thumb_func
 	.type	fndsa_mqpoly_decode, %function
 fndsa_mqpoly_decode:
-	push	{ r4, r5, r6, r7, r8, r10, r11 }
+	push	{ r4, r5, r8, r10, r11 }
 
 	@ ASSUMPTIONS:
 	@  - logn >= 2 (hence, n is a multiple of 4)
@@ -25,7 +26,7 @@ fndsa_mqpoly_decode:
 	@ would avoid most unaligned penalties and save 1/8 of reads.
 
 	@ r0 <- n = 2^logn 
-	movs	r3, #1
+	movw	r3, #1
 	lsl	r0, r3, r0
 	@ r11 <- original source pointer
 	mov	r11, r1
@@ -41,33 +42,27 @@ fndsa_mqpoly_decode:
 	mov	r12, #0xFFFFFFFF
 
 fndsa_mqpoly_decode__L1:
-	@ Get next 7-byte value as integer r7:r5 with big-endian
-	@ interpretation.
-	ldr	r5, [r1], #3
-	ldr	r4, [r1], #4
-	lsls	r5, #8
-	rev	r5, r5
-	rev	r4, r4
-	@ We assemble the 4 values in r6:r7 (packed 16-bit):
-	@ x0: r6<0,13>  <- r5<10,23>
-	@ x1: r6<16,19> <- r4<28,31>,  r6<20,29> <- r5<0,9>
-	@ x2: r7<0,13>  <- r4<14,27>
-	@ x3: r7<16,29> <- r4<0,13>
-	ubfx	r6, r5, #10, #14
-	bfi	r6, r5, #20, #10
-	lsrs	r7, r4, #28
-	orr	r6, r6, r7, lsl #16
-	lsrs	r7, r4, #14
-	bfi	r7, r4, #16, #14
-	ands	r6, r3
-	ands	r7, r3
+	@ Get next 7 bytes into r4 and r5:
+	@   r4: bits 0 to 31
+	@   r5: bits 24 to 55
+	ldr	r4, [r1], #3
+	ldr	r5, [r1], #4
+	@ Assemble the 4 values in r4:r5 (packed 16-bit):
+	@ x0: r4<0,13>  <- r4<0,13>
+	@ x1: r4<16,29> <- r4<14, 27>
+	@ x2: r5<0,13>  <- r5<4, 17>
+	@ x3: r5<16,29> <- r5<18, 31>
+	pkhbt	r4, r4, r4, lsl #2
+	pkhtb	r5, r5, r5, asr #2
+	and	r4, r3
+	and	r5, r3, r5, lsr #2
 	@ Update the overflow mask.
-	usub16	r8, r6, r10
+	usub16	r8, r4, r10
 	and	r12, r12, r8
-	usub16	r8, r7, r10
+	usub16	r8, r5, r10
 	and	r12, r12, r8
 	@ Store the extracted values.
-	strd	r6, r7, [r2], #8
+	strd	r4, r5, [r2], #8
 	@ Loop until all values have been decoded.
 	subs	r0, #4
 	bne	fndsa_mqpoly_decode__L1
@@ -78,7 +73,7 @@ fndsa_mqpoly_decode__L1:
 	and	r12, r12, r12, lsl #16
 	and	r0, r0, r12, asr #31
 
-	pop	{ r4, r5, r6, r7, r8, r10, r11 }
+	pop	{ r4, r5, r8, r10, r11 }
 	bx	lr
 	.size	fndsa_mqpoly_decode,.-fndsa_mqpoly_decode
 
@@ -102,14 +97,14 @@ fndsa_comp_decode:
 	adds	r2, r1
 
 	@ r4   acc
-	@ r5   acc_ptr
-	@ Unprocessed bits are in the top bits of acc. First unprocessed bit
-	@ is at index acc_ptr + 8.
+	@ r5   acc_len
+	@ Unprocessed bits are in the low bits of acc. Only the acc_len low
+	@ bits may be non-zero.
 	eors	r4, r4
-	movs	r5, #24
+	eors	r5, r5
 
 fndsa_comp_decode__L1:
-	@ Invariant: acc_ptr >= 17 (i.e. there are at most 7 unprocessed bits).
+	@ Invariant: acc_len <= 7 (i.e. there are at most 7 unprocessed bits).
 
 	@ Get next 8 bits.
 	cmp	r1, r2
@@ -120,83 +115,68 @@ fndsa_comp_decode__L1:
 
 	@ r6 <- low 7 absolute value bits
 	@ r12 <- sign (word-extended)
-	ubfx	r6, r4, #24, #7
-	asr	r12, r4, #31
-	lsls	r4, #8
+	sbfx	r12, r4, #0, #1
+	ubfx	r6, r4, #1, #7
+	lsrs	r4, #8
 
-	@ We injected 8 bits then consumed 8 bits: acc_ptr is unmodified.
+	@ We injected 8 bits then consumed 8 bits: acc_len is unmodified.
 
-	@ Locate next bit of value 1. If necessary, read one or two
-	@ extra bytes. Heuristically, values are small, so the fast
-	@ path is that the extra bit is already there.
-	cbz	r4, fndsa_comp_decode__Lzb1
-	clz	r7, r4
+	@ Locate next bit of value 1. Since there should be at most six
+	@ bits of value 0, only one extra byte is needed at most.
+	@ Since r4 contains exactly the buffered bits (other bits are zero),
+	@ we can compare it with zero. If it is zero, then we need one
+	@ extra byte.
+	cbnz	r4, fndsa_comp_decode__L2
+	cmp	r1, r2
+	beq	fndsa_comp_decode__Lerr
+	ldrb	r7, [r1], #1
+	lsls	r7, r5
+	orrs	r4, r7
+	adds	r5, #8
+	cbz	r4, fndsa_comp_decode__Lerr
 fndsa_comp_decode__L2:
-	@ There are r7 zeros, then a one. r7 <= 15.
+	@ r4 is non-zero, but contains at most 15 unprocessed bits.
+	@ Locate first bit set to 1 (in low-to-high order); the index will
+	@ be in [0,14].
+	rbit	r7, r4
+	clz	r7, r7
+	@ Add 128*k (with k = index of the one-bit) to the mantissa.
+	@ If we get above B_INF, this is an error.
 	add	r6, r6, r7, lsl #7
-	@ Consume the zeros and the final one.
+	cmp	r6, #B_INF
+	bhi	fndsa_comp_decode__Lerr
+	@ Consume k+1 bits.
 	adds	r7, #1
-	lsls	r4, r7
-	adds	r5, r7
-	@ Mantissa is in r6, sign in r12. Reject "minus zero" encoding,
-	@ i.e. r6 = 0 and r12 = -1
+	lsrs	r4, r7
+	subs	r5, r7
+
+	@ We have the mantissa in r6 (verified to be at most B_INF) and
+	@ the sign bit in r12 (extended to the whole word). We must apply
+	@ the sign, and also reject -0 (which is invalid).
 	orn	r7, r6, r12
 	cbz	r7, fndsa_comp_decode__Lerr
-	@ We assemble the value in r6
 	eor	r6, r6, r12
 	sub	r6, r6, r12
-	strh	r6, [r3], #2
 
-	@ Loop until all values have been obtained.
+	@ Write value and loop.
+	strh	r6, [r3], #2
 	subs	r0, #1
 	bne	fndsa_comp_decode__L1
 
-	@ Check that remaining unused bits are zero (accumulator and
-	@ all unused bytes).
+	@ Check that unused bits and extra bytes are all zero.
 	movs	r0, #1
 	cbnz	r4, fndsa_comp_decode__Lerr
+fndsa_comp_decode__L3:
 	cmp	r1, r2
 	beq	fndsa_comp_decode__Lexit
-fndsa_comp_decode__L3:
 	ldrb	r6, [r1], #1
 	cbnz	r6, fndsa_comp_decode__Lerr
-	cmp	r1, r2
-	bne	fndsa_comp_decode__L3
+	b	fndsa_comp_decode__L3
+	movs	r0, #1
 fndsa_comp_decode__Lexit:
 	pop	{ r4, r5, r6, r7 }
 	bx	lr
 
-fndsa_comp_decode__Lzb1:
-	@ All currently buffered bits are zero, we must get an extra byte.
-	@ Get next byte.
-	cmp	r1, r2
-	beq	fndsa_comp_decode__Lerr
-	ldrb	r7, [r1], #1
-	lsls	r7, r5
-	orrs	r4, r7
-	cbz	r4, fndsa_comp_decode__Lzb2
-	subs	r5, #8
-	clz	r7, r4
-	b	fndsa_comp_decode__L2
-
-fndsa_comp_decode__Lzb2:
-	@ All currently buffered bits are zero, and the next byte was
-	@ all-zeros too; we must get another byte.
-	cmp	r1, r2
-	beq	fndsa_comp_decode__Lerr
-	ldrb	r7, [r1], #1
-	subs	r5, #8
-	lsls	r7, r5
-	orrs	r4, r7
-	cbz	r4, fndsa_comp_decode__Lerr
-	subs	r5, #8
-	clz	r7, r4
-	@ Since we added two bytes and the accumulator already contained
-	@ up to 7 bits, then we may have up to 23 bits at this point,
-	@ hence r7 can be up to 22. Values greater than 15 are invalid.
-	cmp	r7, #15
-	bls	fndsa_comp_decode__L2
-	@ Fall through to error sequence.
 fndsa_comp_decode__Lerr:
 	eors	r0, r0
 	b	fndsa_comp_decode__Lexit
