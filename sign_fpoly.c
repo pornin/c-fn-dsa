@@ -6,8 +6,8 @@
 
 /* If rev() is the bit-reversal function over 10 bits, then,
    for k = 1 to 1023:
-     GM[2*k + 0] = cos(k*pi/1024)
-     GM[2*k + 1] = sin(k*pi/1024)
+     GM[2*k + 0] = cos(rev10(k)*pi/1024)
+     GM[2*k + 1] = sin(rev10(k)*pi/1024)
    All values have been computed with Sage with enough precision to get
    properly rounding values. GM[0] and GM[1] are not used. */
 static const fpr GM[] = {
