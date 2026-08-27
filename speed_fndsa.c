@@ -110,6 +110,22 @@ core_cycles(void)
 	return __rdpmc(0x40000001);
 #endif
 }
+#elif defined __aarch64__ && defined __APPLE__ && (defined __GNUC__ || defined __clang__)
+/* On Apple Silicon, pmccntr_el0 is not accessible from user space (reading it
+   raises SIGILL), so the generic timer cntvct_el0 is used instead. This is a
+   fixed-frequency time counter, not a cycle counter: its rate is reported by
+   cntfrq_el0 (1 GHz on the M-series tested here), so the measured values are
+   elapsed timer ticks, not CPU cycles, in the same spirit as the x86
+   timestamp counter selected with -DFNDSA_TSC=1. True cycle counts on Apple
+   Silicon would require the reverse-engineered performance-counter API, which
+   needs elevated privileges. */
+static inline uint64_t
+core_cycles(void)
+{
+	uint64_t x;
+	__asm__ __volatile__ ("isb\n\tmrs %0, cntvct_el0" : "=r" (x) : : );
+	return x;
+}
 #elif defined __aarch64__ && (defined __GNUC__ || defined __clang__)
 static inline uint64_t
 core_cycles(void)
