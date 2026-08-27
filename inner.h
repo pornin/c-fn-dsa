@@ -693,7 +693,13 @@ tbmask(uint32_t x)
    documented in May 2009 (this is the earliest copy of the documentation
    in archive.org), so presumably it was at least in MSVC 2008, which
    is what we test above. */
-#define ctz32_nonzero(x)   (_BitScanForward(x) - 1)
+static inline int ctz32_nonzero(unsigned int n)
+{
+    unsigned long i;
+    _BitScanForward(&i, n);
+    return i;
+}
+#define ctz32_nonzero ctz32_nonzero
 #endif
 
 /* Get the number of trailing zeros in a 32-bit value. The input MUST NOT
