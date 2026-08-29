@@ -109,7 +109,7 @@ keygen_inner(unsigned logn, const void *seed, size_t seed_len,
 			mqpoly_small_to_int(logn, g, h);
 			mqpoly_int_to_ntt(logn, ft);
 			mqpoly_int_to_ntt(logn, h);
-			mqpoly_div_ntt(logn, h, ft);
+			mqpoly_div_ntt(logn, h, ft, ft + n);
 			mqpoly_int_to_ext(logn, h);
 
 			/* We encode the public key in the temporary area. */
@@ -240,7 +240,7 @@ avx2_keygen_inner(unsigned logn, const void *seed, size_t seed_len,
 			avx2_mqpoly_small_to_int(logn, g, h);
 			avx2_mqpoly_int_to_ntt(logn, ft);
 			avx2_mqpoly_int_to_ntt(logn, h);
-			avx2_mqpoly_div_ntt(logn, h, ft);
+			avx2_mqpoly_div_ntt(logn, h, ft, ft + n);
 			avx2_mqpoly_int_to_ext(logn, h);
 
 			/* We encode the public key in the temporary area. */

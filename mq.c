@@ -13,6 +13,11 @@
 /* 2^64 mod q */
 #define R2          5664
 
+/* Q1I split into low and high parts (16 bits each), converted to
+   signed 16-bit representation. */
+#define Q1Ilo   12287
+#define Q1Ihi   -2304
+
 #if FNDSA_ASM_CORTEXM4
 /*
  * On the ARM Cortex-M4, we use a relaxed internal representation with
@@ -68,6 +73,28 @@ mq_add(uint32_t x, uint32_t y)
 	return Q - x;
 }
 
+#if FNDSA_SSE2
+TARGET_SSE2
+static inline __m128i
+mq_add_x8(__m128i x, __m128i y)
+{
+	__m128i qq = _mm_set1_epi16(Q);
+	__m128i a = _mm_sub_epi16(qq, _mm_add_epi16(x, y));
+	__m128i b = _mm_add_epi16(a, _mm_and_si128(qq, _mm_srai_epi16(a, 15)));
+	return _mm_sub_epi16(qq, b);
+}
+#elif FNDSA_NEON
+TARGET_NEON
+static inline int16x8_t
+mq_add_x8(int16x8_t x, int16x8_t y)
+{
+	int16x8_t qq = vdupq_n_s16(Q);
+	int16x8_t a = vsubq_s16(qq, vaddq_s16(x, y));
+	int16x8_t b = vaddq_s16(a, vandq_s16(qq, vshrq_n_s16(a, 15)));
+	return vsubq_s16(qq, b);
+}
+#endif
+
 static inline uint32_t
 mq_sub(uint32_t x, uint32_t y)
 {
@@ -79,12 +106,58 @@ mq_sub(uint32_t x, uint32_t y)
 	return Q - y;
 }
 
+#if FNDSA_SSE2
+TARGET_SSE2
+static inline __m128i
+mq_sub_x8(__m128i x, __m128i y)
+{
+	__m128i qq = _mm_set1_epi16(Q);
+	__m128i a = _mm_sub_epi16(y, x);
+	__m128i b = _mm_add_epi16(a, _mm_and_si128(qq, _mm_srai_epi16(a, 15)));
+	return _mm_sub_epi16(qq, b);
+}
+#elif FNDSA_NEON
+TARGET_NEON
+static inline int16x8_t
+mq_sub_x8(int16x8_t x, int16x8_t y)
+{
+	int16x8_t qq = vdupq_n_s16(Q);
+	int16x8_t a = vsubq_s16(y, x);
+	int16x8_t b = vaddq_s16(a, vandq_s16(qq, vshrq_n_s16(a, 15)));
+	return vsubq_s16(qq, b);
+}
+#endif
+
 static inline uint32_t
 mq_half(uint32_t x)
 {
 	x += Q & -(x & 1);
 	return x >> 1;
 }
+
+#if FNDSA_SSE2
+TARGET_SSE2
+static inline __m128i
+mq_half_x8(__m128i x)
+{
+	__m128i qq = _mm_set1_epi16(Q);
+	__m128i y = _mm_and_si128(x, _mm_set1_epi16(1));
+	y = _mm_sub_epi16(_mm_setzero_si128(), y);
+	y = _mm_and_si128(y, qq);
+	return _mm_srli_epi16(_mm_add_epi16(x, y), 1);
+}
+#elif FNDSA_NEON
+TARGET_NEON
+static inline int16x8_t
+mq_half_x8(int16x8_t x)
+{
+	int16x8_t qq = vdupq_n_s16(Q);
+	int16x8_t y = vshrq_n_s16(vshlq_n_s16(x, 15), 15);
+	y = vandq_s16(y, qq);
+	return vreinterpretq_s16_u16(
+		vshrq_n_u16(vreinterpretq_u16_s16(vaddq_s16(x, y)), 1));
+}
+#endif
 
 static inline uint32_t
 mq_mred(uint32_t x)
@@ -93,6 +166,73 @@ mq_mred(uint32_t x)
 	x = (x >> 16) * Q;
 	return (x >> 16) + 1;
 }
+
+#if FNDSA_SSE2
+
+TARGET_SSE2
+static inline __m128i
+mq_mred_x8(__m128i lo, __m128i hi)
+{
+	__m128i qx8 = _mm_set1_epi16(Q);
+	__m128i q1ilox8 = _mm_set1_epi16(Q1Ilo);
+	__m128i q1ihix8 = _mm_set1_epi16(Q1Ihi);
+
+	/* x <- (x * Q1I) >> 16
+	   32-bit input is split into its low and high halves. Q1I is
+	   itself a 32-bit constant. Product is computed modulo 2^32,
+	   and we are interested only in its high 16 bits. */
+	__m128i x = _mm_add_epi16(
+		_mm_add_epi16(
+			_mm_mulhi_epu16(lo, q1ilox8),
+			_mm_mullo_epi16(lo, q1ihix8)),
+		_mm_mullo_epi16(hi, q1ilox8));
+
+	/* x <- (x * Q) >> 16
+	   x and Q both fit on 16 bits each. */
+	x = _mm_mulhi_epu16(x, qx8);
+
+	/* Result is x + 1. */
+	return _mm_add_epi16(x, _mm_set1_epi16(1));
+}
+
+TARGET_SSE2
+static inline __m128i
+mq_mmul_x8(__m128i x, __m128i y)
+{
+	return mq_mred_x8(_mm_mullo_epi16(x, y), _mm_mulhi_epu16(x, y));
+}
+
+#elif FNDSA_NEON
+
+TARGET_NEON
+static inline int16x8_t
+mq_mmul_x8(int16x8_t a, int16x8_t b)
+{
+	/* Compute 32-bit products. */
+	uint32x4_t c0 = vreinterpretq_u32_s32(
+		vmull_s16(vget_low_s16(a), vget_low_s16(b)));
+	uint32x4_t c1 = vreinterpretq_u32_s32(
+		vmull_s16(vget_high_s16(a), vget_high_s16(b)));
+
+	/* x <- (x * Q1I) >> 16, reassembled into a single word. */
+	uint32x4_t q1ix8 = vdupq_n_u32(Q1I);
+	c0 = vmulq_u32(c0, q1ix8);
+	c1 = vmulq_u32(c1, q1ix8);
+	uint16x8_t d = vuzp2q_u16(
+		vreinterpretq_u16_u32(c0),
+		vreinterpretq_u16_u32(c1));
+
+	/* x <- (x * Q) >> 16
+	   x and Q both fit on 16 bits each. */
+	uint16x4_t qx8 = vdup_n_u16(Q);
+	c0 = vmull_u16(vget_low_u16(d), qx8);
+	c1 = vmull_u16(vget_high_u16(d), qx8);
+	d = vuzp2q_u16(vreinterpretq_u16_u32(c0), vreinterpretq_u16_u32(c1));
+
+	return vreinterpretq_s16_u16(vaddq_u16(d, vdupq_n_u16(1)));
+}
+
+#endif
 
 #endif
 
@@ -133,6 +273,74 @@ mq_div(uint32_t x, uint32_t y)
 	return mq_mmul(x, iy);
 }
 
+#if FNDSA_SSE2
+TARGET_SSE2
+static __m128i
+mq_div_x8(__m128i x, __m128i y)
+{
+	/* Convert y to Montgomery representation. */
+	y = mq_mmul_x8(y, _mm_set1_epi16(R2));
+
+	/* 1/y = y^(q-2), with a custom addition chain. */
+	__m128i y2 = mq_mmul_x8(y, y);
+	__m128i y3 = mq_mmul_x8(y2, y);
+	__m128i y5 = mq_mmul_x8(y3, y2);
+	__m128i y10 = mq_mmul_x8(y5, y5);
+	__m128i y20 = mq_mmul_x8(y10, y10);
+	__m128i y40 = mq_mmul_x8(y20, y20);
+	__m128i y80 = mq_mmul_x8(y40, y40);
+	__m128i y160 = mq_mmul_x8(y80, y80);
+	__m128i y163 = mq_mmul_x8(y160, y3);
+	__m128i y323 = mq_mmul_x8(y163, y160);
+	__m128i y646 = mq_mmul_x8(y323, y323);
+	__m128i y1292 = mq_mmul_x8(y646, y646);
+	__m128i y1455 = mq_mmul_x8(y1292, y163);
+	__m128i y2910 = mq_mmul_x8(y1455, y1455);
+	__m128i y5820 = mq_mmul_x8(y2910, y2910);
+	__m128i y6143 = mq_mmul_x8(y5820, y323);
+	__m128i y12286 = mq_mmul_x8(y6143, y6143);
+	__m128i iy = mq_mmul_x8(y12286, y);
+
+	/* Multiply by the dividend (x) to get x/y. Since iy is in
+	   Montgomery representation but x is in normal representation,
+	   the result is in normal representation. */
+	return mq_mmul_x8(x, iy);
+}
+#elif FNDSA_NEON
+TARGET_SSE2
+static int16x8_t
+mq_div_x8(int16x8_t x, int16x8_t y)
+{
+	/* Convert y to Montgomery representation. */
+	y = mq_mmul_x8(y, vdupq_n_s16(R2));
+
+	/* 1/y = y^(q-2), with a custom addition chain. */
+	int16x8_t y2 = mq_mmul_x8(y, y);
+	int16x8_t y3 = mq_mmul_x8(y2, y);
+	int16x8_t y5 = mq_mmul_x8(y3, y2);
+	int16x8_t y10 = mq_mmul_x8(y5, y5);
+	int16x8_t y20 = mq_mmul_x8(y10, y10);
+	int16x8_t y40 = mq_mmul_x8(y20, y20);
+	int16x8_t y80 = mq_mmul_x8(y40, y40);
+	int16x8_t y160 = mq_mmul_x8(y80, y80);
+	int16x8_t y163 = mq_mmul_x8(y160, y3);
+	int16x8_t y323 = mq_mmul_x8(y163, y160);
+	int16x8_t y646 = mq_mmul_x8(y323, y323);
+	int16x8_t y1292 = mq_mmul_x8(y646, y646);
+	int16x8_t y1455 = mq_mmul_x8(y1292, y163);
+	int16x8_t y2910 = mq_mmul_x8(y1455, y1455);
+	int16x8_t y5820 = mq_mmul_x8(y2910, y2910);
+	int16x8_t y6143 = mq_mmul_x8(y5820, y323);
+	int16x8_t y12286 = mq_mmul_x8(y6143, y6143);
+	int16x8_t iy = mq_mmul_x8(y12286, y);
+
+	/* Multiply by the dividend (x) to get x/y. Since iy is in
+	   Montgomery representation but x is in normal representation,
+	   the result is in normal representation. */
+	return mq_mmul_x8(x, iy);
+}
+#endif
+
 #if FNDSA_AVX2
 
 TARGET_AVX2
@@ -168,11 +376,6 @@ mq_half_x16(__m256i x)
 	y = _mm256_add_epi16(x, y);
 	return _mm256_srli_epi16(y, 1);
 }
-
-/* Q1I split into low and high parts (16 bits each), converted to
-   signed 16-bit representation. */
-#define Q1Ilo   12287
-#define Q1Ihi   -2304
 
 TARGET_AVX2
 static inline __m256i
@@ -244,10 +447,50 @@ mq_div_x16(__m256i x, __m256i y)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_small_to_int(unsigned logn, const int8_t *f, uint16_t *d)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 4) {
+		const __m128i *fp = (const __m128i *)f;
+		__m128i *dp = (__m128i *)d;
+		__m128i qq = _mm_set1_epi16(Q);
+		for (size_t i = 0; i < (1u << (logn - 4)); i ++) {
+			__m128i x = _mm_loadu_si128(fp + i);
+			x = _mm_sub_epi8(_mm_setzero_si128(), x);
+			__m128i x0 = _mm_srai_epi16(
+				_mm_unpacklo_epi8(_mm_setzero_si128(), x), 8);
+			__m128i x1 = _mm_srai_epi16(
+				_mm_unpackhi_epi8(_mm_setzero_si128(), x), 8);
+			x0 = _mm_add_epi16(x0,
+				_mm_and_si128(_mm_srai_epi16(x0, 15), qq));
+			x1 = _mm_add_epi16(x1,
+				_mm_and_si128(_mm_srai_epi16(x1, 15), qq));
+			x0 = _mm_sub_epi16(qq, x0);
+			x1 = _mm_sub_epi16(qq, x1);
+			_mm_storeu_si128(dp + (i << 1) + 0, x0);
+			_mm_storeu_si128(dp + (i << 1) + 1, x1);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 4) {
+		int16x8_t zero = vdupq_n_s16(0);
+		int16x8_t qq = vdupq_n_s16(Q);
+		for (size_t i = 0; i < n; i += 16) {
+			int8x16_t x = vld1q_s8(f + i);
+			int16x8_t x0 = vmovl_s8(vget_low_s8(x));
+			int16x8_t x1 = vmovl_s8(vget_high_s8(x));
+			x0 = vaddq_s16(x0, vandq_s16(qq, vcleq_s16(x0, zero)));
+			x1 = vaddq_s16(x1, vandq_s16(qq, vcleq_s16(x1, zero)));
+			vst1q_s16((int16_t *)d + i, x0);
+			vst1q_s16((int16_t *)d + i + 8, x1);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		uint32_t x = -(uint32_t)f[i];
 		d[i] = (uint16_t)(Q - (x + (Q & (x >> 16))));
@@ -290,10 +533,37 @@ avx2_mqpoly_small_to_int(unsigned logn, const int8_t *f, uint16_t *d)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_signed_to_int(unsigned logn, uint16_t *d)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i *dp = (__m128i *)d;
+		__m128i qq = _mm_set1_epi16(Q);
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			__m128i y = _mm_loadu_si128(dp + i);
+			y = _mm_sub_epi16(_mm_setzero_si128(), y);
+			y = _mm_add_epi16(y,
+				_mm_and_si128(qq, _mm_srai_epi16(y, 15)));
+			y = _mm_sub_epi16(qq, y);
+			_mm_storeu_si128(dp + i, y);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t zero = vdupq_n_s16(0);
+		int16x8_t qq = vdupq_n_s16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t x = vld1q_s16((int16_t *)d + i);
+			x = vaddq_s16(x, vandq_s16(qq, vcleq_s16(x, zero)));
+			vst1q_s16((int16_t *)d + i, x);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		uint32_t x = -(uint32_t)*(int16_t *)&d[i];
 		d[i] = (uint16_t)(Q - (x + (Q & (x >> 16))));
@@ -392,12 +662,72 @@ avx2_mqpoly_int_to_small(unsigned logn, const uint16_t *d, int8_t *f)
 }
 #endif
 
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_int_to_signed(unsigned logn, uint16_t *d)
+{
+	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xq = _mm_set1_epi16(Q);
+		__m128i xh = _mm_set1_epi16((Q - 1) >> 1);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xd = _mm_loadu_si128((__m128i *)(d + i));
+			xd = _mm_sub_epi16(xd,
+				_mm_and_si128(xq, _mm_cmpgt_epi16(xd, xh)));
+			_mm_storeu_si128((__m128i *)(d + i), xd);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xq = vdupq_n_s16(Q);
+		int16x8_t xh = vdupq_n_s16((Q - 1) >> 1);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xd = vld1q_s16((int16_t *)(d + i));
+			xd = vsubq_s16(xd, vandq_s16(xq, vcgtq_s16(xd, xh)));
+			vst1q_s16((int16_t *)(d + i), xd);
+		}
+		return;
+	}
+#endif
+	for (size_t i = 0; i < n; i ++) {
+		uint32_t x = d[i];
+		x -= Q & ((((Q - 1) >> 1) - x) >> 16);
+		d[i] = (uint16_t)x;
+	}
+}
+
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_ext_to_int(unsigned logn, uint16_t *d)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xq = _mm_set1_epi16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xd = _mm_loadu_si128((__m128i *)(d + i));
+			xd = _mm_or_si128(xd, _mm_and_si128(xq,
+				_mm_cmpeq_epi16(xd, _mm_setzero_si128())));
+			_mm_storeu_si128((__m128i *)(d + i), xd);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xq = vdupq_n_s16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xd = vld1q_s16((int16_t *)(d + i));
+			xd = vorrq_s16(xd, vandq_s16(xq, vceqzq_s16(xd)));
+			vst1q_s16((int16_t *)(d + i), xd);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		uint32_t x = d[i];
 		x += Q & ((x - 1) >> 16);
@@ -433,10 +763,32 @@ avx2_mqpoly_ext_to_int(unsigned logn, uint16_t *d)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_int_to_ext(unsigned logn, uint16_t *d)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xq = _mm_set1_epi16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xd = _mm_loadu_si128((__m128i *)(d + i));
+			xd = _mm_andnot_si128(_mm_cmpeq_epi16(xd, xq), xd);
+			_mm_storeu_si128((__m128i *)(d + i), xd);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xq = vdupq_n_s16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xd = vld1q_s16((int16_t *)(d + i));
+			xd = vandq_s16(xd, vcltq_s16(xd, xq));
+			vst1q_s16((int16_t *)(d + i), xd);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		uint32_t x = (uint32_t)d[i] - Q;
 		x += Q & (x >> 16);
@@ -455,8 +807,7 @@ avx2_mqpoly_int_to_ext(unsigned logn, uint16_t *d)
 		__m256i qq = _mm256_set1_epi16(Q);
 		for (size_t i = 0; i < (1u << (logn - 4)); i ++) {
 			__m256i y = _mm256_loadu_si256(dp + i);
-			y = _mm256_sub_epi16(y, _mm256_and_si256(qq,
-				_mm256_cmpeq_epi16(y, qq)));
+			y = _mm256_andnot_si256(_mm256_cmpeq_epi16(y, qq), y);
 			_mm256_storeu_si256(dp + i, y);
 		}
 	} else {
@@ -471,6 +822,275 @@ avx2_mqpoly_int_to_ext(unsigned logn, uint16_t *d)
 #endif
 
 #if !FNDSA_ASM_CORTEXM4
+
+#if FNDSA_SSE2
+
+TARGET_SSE2
+static inline void
+sse2_NTT16(__m128i *a0, __m128i *a1, size_t k)
+{
+	__m128i xa0, xa1, xt1, xt2, xt3, xt4, xg1, xg2, xg3;
+	uint16_t g1_0, g1_1;
+
+	xa0 = *a0;
+	xa1 = *a1;
+
+	/* t = 16, m = 1 */
+	xt1 = xa0;
+	xt2 = mq_mmul_x8(xa1, _mm_set1_epi16(mq_GM[k]));
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+
+	/* t = 8, m = 2 */
+	xt1 = _mm_unpacklo_epi64(xa0, xa1);
+	xt2 = _mm_unpackhi_epi64(xa0, xa1);
+	g1_0 = mq_GM[(k << 1) + 0];
+	g1_1 = mq_GM[(k << 1) + 1];
+	xg1 = _mm_setr_epi16(g1_0, g1_0, g1_0, g1_0, g1_1, g1_1, g1_1, g1_1);
+	xt2 = mq_mmul_x8(xt2, xg1);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  2  3  8  9 10 11 */
+	/* xa1:  4  5  6  7 12 13 14 15 */
+
+	/* t = 4, m = 4 */
+	xt3 = _mm_shuffle_epi32(xa0, 0xD8);
+	xt4 = _mm_shuffle_epi32(xa1, 0xD8);
+	xt1 = _mm_unpacklo_epi32(xt3, xt4);
+	xt2 = _mm_unpackhi_epi32(xt3, xt4);
+	xg2 = _mm_setr_epi32(
+		*(int32_t *)(mq_GM + (k << 2)),
+		*(int32_t *)(mq_GM + (k << 2) + 2),
+		0, 0);
+	xg2 = _mm_unpacklo_epi16(xg2, xg2);
+	xt2 = mq_mmul_x8(xt2, xg2);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  4  5  8  9 12 13 */
+	/* xa1:  2  3  6  7 10 11 14 15 */
+
+	/* t = 2, m = 8 */
+	xt3 = _mm_unpacklo_epi16(xa0, xa1);
+	xt4 = _mm_unpackhi_epi16(xa0, xa1);
+	/* xt3:  0  2  1  3  4  6  5  7 */
+	/* xt4:  8 10  9 11 12 14 13 15 */
+	xt3 = _mm_shuffle_epi32(xt3, 0xD8);
+	xt4 = _mm_shuffle_epi32(xt4, 0xD8);
+	/* xt3:  0  2  4  6  1  3  5  7 */
+	/* xt4:  8 10 12 14  9 11 13 15 */
+	xt1 = _mm_unpacklo_epi64(xt3, xt4);
+	xt2 = _mm_unpackhi_epi64(xt3, xt4);
+	xg3 = _mm_loadu_si128((__m128i *)(mq_GM + (k << 3)));
+	xt2 = mq_mmul_x8(xt2, xg3);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  2  4  6  8 10 12 14 */
+	/* xa1:  1  3  5  7  9 11 13 15 */
+	*a0 = _mm_unpacklo_epi16(xa0, xa1);
+	*a1 = _mm_unpackhi_epi16(xa0, xa1);
+}
+
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_int_to_ntt(unsigned logn, uint16_t *d)
+{
+	if (logn >= 4) {
+		__m128i *dp = (__m128i *)d;
+		size_t n = (size_t)1 << logn;
+		size_t t = n >> 3;
+		for (unsigned lm = 0; lm < (logn - 4); lm ++) {
+			size_t m = (size_t)1 << lm;
+			size_t ht = t >> 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < m; i ++) {
+				__m128i xs = _mm_set1_epi16(mq_GM[i + m]);
+				for (size_t j = 0; j < ht; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + ht;
+					__m128i x1, x2;
+					x1 = _mm_loadu_si128(dp + j1);
+					x2 = _mm_loadu_si128(dp + j2);
+					x2 = mq_mmul_x8(x2, xs);
+					_mm_storeu_si128(dp + j1,
+						mq_add_x8(x1, x2));
+					_mm_storeu_si128(dp + j2,
+						mq_sub_x8(x1, x2));
+				}
+				j0 += t;
+			}
+			t = ht;
+		}
+		size_t m = n >> 4;
+		for (size_t i = 0; i < m; i ++) {
+			__m128i xa0 = _mm_loadu_si128(dp + (i << 1) + 0);
+			__m128i xa1 = _mm_loadu_si128(dp + (i << 1) + 1);
+			sse2_NTT16(&xa0, &xa1, i + m);
+			_mm_storeu_si128(dp + (i << 1) + 0, xa0);
+			_mm_storeu_si128(dp + (i << 1) + 1, xa1);
+		}
+	} else {
+		size_t t = (size_t)1 << logn;
+		for (unsigned lm = 0; lm < logn; lm ++) {
+			size_t m = (size_t)1 << lm;
+			size_t ht = t >> 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < m; i ++) {
+				uint32_t s = mq_GM[i + m];
+				for (size_t j = 0; j < ht; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + ht;
+					uint32_t x1 = d[j1];
+					uint32_t x2 = mq_mmul(d[j2], s);
+					d[j1] = (uint16_t)mq_add(x1, x2);
+					d[j2] = (uint16_t)mq_sub(x1, x2);
+				}
+				j0 += t;
+			}
+			t = ht;
+		}
+	}
+}
+
+#elif FNDSA_NEON
+
+TARGET_NEON
+static inline void
+neon_NTT16(int16x8_t *a0, int16x8_t *a1, size_t k)
+{
+	int16x8_t xa0, xa1, xt1, xt2, xt3, xt4, xg1, xg2, xg3;
+	uint16_t g1_0, g1_1;
+
+	xa0 = *a0;
+	xa1 = *a1;
+
+	/* t = 16, m = 1 */
+	xt1 = xa0;
+	xt2 = mq_mmul_x8(xa1, vdupq_n_s16(mq_GM[k]));
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+
+	/* t = 8, m = 2 */
+	xt1 = vreinterpretq_s16_s64(vzip1q_s64(
+		vreinterpretq_s64_s16(xa0),
+		vreinterpretq_s64_s16(xa1)));
+	xt2 = vreinterpretq_s16_s64(vzip2q_s64(
+		vreinterpretq_s64_s16(xa0),
+		vreinterpretq_s64_s16(xa1)));
+	g1_0 = mq_GM[(k << 1) + 0];
+	g1_1 = mq_GM[(k << 1) + 1];
+	xg1 = vcombine_s16(vdup_n_s16(g1_0), vdup_n_s16(g1_1));
+	xt2 = mq_mmul_x8(xt2, xg1);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  2  3  8  9 10 11 */
+	/* xa1:  4  5  6  7 12 13 14 15 */
+
+	/* t = 4, m = 4 */
+	xt1 = vreinterpretq_s16_s32(vtrn1q_s32(
+		vreinterpretq_s32_s16(xa0),
+		vreinterpretq_s32_s16(xa1)));
+	xt2 = vreinterpretq_s16_s32(vtrn2q_s32(
+		vreinterpretq_s32_s16(xa0),
+		vreinterpretq_s32_s16(xa1)));
+	xg2 = vreinterpretq_s16_u64(
+		vdupq_n_u64(*(uint64_t *)(mq_GM + (k << 2))));
+	xg2 = vzip1q_s16(xg2, xg2);
+	xt2 = mq_mmul_x8(xt2, xg2);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  1  4  5  8  9 12 13 */
+	/* xa1:  2  3  6  7 10 11 14 15 */
+
+	/* t = 2, m = 8 */
+	xt1 = vtrn1q_s16(xa0, xa1);
+	xt2 = vtrn2q_s16(xa0, xa1);
+	xg3 = vld1q_s16((int16_t *)(mq_GM + (k << 3)));
+	xt2 = mq_mmul_x8(xt2, xg3);
+	xa0 = mq_add_x8(xt1, xt2);
+	xa1 = mq_sub_x8(xt1, xt2);
+
+	/* xa0:  0  2  4  6  8 10 12 14 */
+	/* xa1:  1  3  5  7  9 11 13 15 */
+	*a0 = vzip1q_s16(xa0, xa1);
+	*a1 = vzip2q_s16(xa0, xa1);
+}
+
+/* see inner.h */
+TARGET_NEON
+void
+mqpoly_int_to_ntt(unsigned logn, uint16_t *d)
+{
+	if (logn >= 4) {
+		size_t n = (size_t)1 << logn;
+		size_t t = n >> 3;
+		for (unsigned lm = 0; lm < (logn - 4); lm ++) {
+			size_t m = (size_t)1 << lm;
+			size_t ht = t >> 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < m; i ++) {
+				int16x8_t xs = vdupq_n_s16(mq_GM[i + m]);
+				for (size_t j = 0; j < ht; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + ht;
+					int16x8_t x1 = vld1q_s16(
+						(int16_t *)d + (j1 << 3));
+					int16x8_t x2 = vld1q_s16(
+						(int16_t *)d + (j2 << 3));
+					x2 = mq_mmul_x8(x2, xs);
+					vst1q_s16((int16_t *)d + (j1 << 3),
+						mq_add_x8(x1, x2));
+					vst1q_s16((int16_t *)d + (j2 << 3),
+						mq_sub_x8(x1, x2));
+				}
+				j0 += t;
+			}
+			t = ht;
+		}
+		size_t m = n >> 4;
+		for (size_t i = 0; i < m; i ++) {
+			int16x8_t xa0 = vld1q_s16((int16_t *)d + (i << 4) + 0);
+			int16x8_t xa1 = vld1q_s16((int16_t *)d + (i << 4) + 8);
+			neon_NTT16(&xa0, &xa1, i + m);
+			vst1q_s16((int16_t *)d + (i << 4) + 0, xa0);
+			vst1q_s16((int16_t *)d + (i << 4) + 8, xa1);
+		}
+	} else {
+		size_t t = (size_t)1 << logn;
+		for (unsigned lm = 0; lm < logn; lm ++) {
+			size_t m = (size_t)1 << lm;
+			size_t ht = t >> 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < m; i ++) {
+				uint32_t s = mq_GM[i + m];
+				for (size_t j = 0; j < ht; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + ht;
+					uint32_t x1 = d[j1];
+					uint32_t x2 = mq_mmul(d[j2], s);
+					d[j1] = (uint16_t)mq_add(x1, x2);
+					d[j2] = (uint16_t)mq_sub(x1, x2);
+				}
+				j0 += t;
+			}
+			t = ht;
+		}
+	}
+}
+
+#else
+
 /* see inner.h */
 void
 mqpoly_int_to_ntt(unsigned logn, uint16_t *d)
@@ -498,6 +1118,9 @@ mqpoly_int_to_ntt(unsigned logn, uint16_t *d)
 		t = ht;
 	}
 }
+
+#endif
+
 #endif
 
 #if FNDSA_AVX2
@@ -655,6 +1278,286 @@ avx2_mqpoly_int_to_ntt(unsigned logn, uint16_t *d)
 #endif
 
 #if !FNDSA_ASM_CORTEXM4
+
+#if FNDSA_SSE2
+
+TARGET_SSE2
+static inline void
+sse2_iNTT16(__m128i *a0, __m128i *a1, size_t k)
+{
+	__m128i xa0, xa1, xt1, xt2, xt3, xt4, xig0, xig1, xig2, xig3;
+	uint16_t ig1_0, ig1_1;
+
+	xa0 = *a0;
+	xa1 = *a1;
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+	xt1 = _mm_unpacklo_epi16(xa0, xa1);
+	xt2 = _mm_unpackhi_epi16(xa0, xa1);
+	xt3 = _mm_unpacklo_epi16(xt1, xt2);
+	xt4 = _mm_unpackhi_epi16(xt1, xt2);
+	xa0 = _mm_unpacklo_epi16(xt3, xt4);
+	xa1 = _mm_unpackhi_epi16(xt3, xt4);
+
+	/* xa0:  0  2  4  6  8 10 12 14 */
+	/* xa1:  1  3  5  7  9 11 13 15 */
+	xt1 = mq_add_x8(xa0, xa1);
+	xt2 = mq_sub_x8(xa0, xa1);
+	xig3 = _mm_loadu_si128((__m128i *)(mq_iGM + (k << 3)));
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig3);
+
+	/* xa0:  0  2  4  6  8 10 12 14 */
+	/* xa1:  1  3  5  7  9 11 13 15 */
+	xt1 = _mm_unpacklo_epi16(xa0, xa1);
+	xt2 = _mm_unpackhi_epi16(xa0, xa1);
+	xt3 = _mm_shuffle_epi32(xt1, 0xD8);
+	xt4 = _mm_shuffle_epi32(xt2, 0xD8);
+	xa0 = _mm_unpacklo_epi64(xt3, xt4);
+	xa1 = _mm_unpackhi_epi64(xt3, xt4);
+
+	/* xa0:  0  1  4  5  8  9 12 13 */
+	/* xa1:  2  3  6  7 10 11 14 15 */
+	xt1 = mq_add_x8(xa0, xa1);
+	xt2 = mq_sub_x8(xa0, xa1);
+	xig2 = _mm_setr_epi32(
+		*(int32_t *)(mq_iGM + (k << 2)),
+		*(int32_t *)(mq_iGM + (k << 2) + 2),
+		0, 0);
+	xig2 = _mm_unpacklo_epi16(xig2, xig2);
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig2);
+
+	/* xa0:  0  1  4  5  8  9 12 13 */
+	/* xa1:  2  3  6  7 10 11 14 15 */
+	xt1 = _mm_shuffle_epi32(xa0, 0xD8);
+	xt2 = _mm_shuffle_epi32(xa1, 0xD8);
+	xa0 = _mm_unpacklo_epi32(xt1, xt2);
+	xa1 = _mm_unpackhi_epi32(xt1, xt2);
+
+	/* xa0:  0  1  2  3  8  9 10 11 */
+	/* xa1:  4  5  6  7 12 13 14 15 */
+	xt1 = mq_add_x8(xa0, xa1);
+	xt2 = mq_sub_x8(xa0, xa1);
+	ig1_0 = mq_iGM[(k << 1) + 0];
+	ig1_1 = mq_iGM[(k << 1) + 1];
+	xig1 = _mm_setr_epi16(
+		ig1_0, ig1_0, ig1_0, ig1_0, ig1_1, ig1_1, ig1_1, ig1_1);
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig1);
+
+	/* xa0:  0  1  2  3  8  9 10 11 */
+	/* xa1:  4  5  6  7 12 13 14 15 */
+	xt1 = _mm_unpacklo_epi64(xa0, xa1);
+	xt2 = _mm_unpackhi_epi64(xa0, xa1);
+	xa0 = xt1;
+	xa1 = xt2;
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+	xt1 = mq_add_x8(xa0, xa1);
+	xt2 = mq_sub_x8(xa0, xa1);
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, _mm_set1_epi16(mq_iGM[k]));
+
+	*a0 = xa0;
+	*a1 = xa1;
+}
+
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_ntt_to_int(unsigned logn, uint16_t *d)
+{
+	if (logn >= 4) {
+		__m128i *dp = (__m128i *)d;
+		size_t n = (size_t)1 << logn;
+		size_t m = n >> 4;
+		for (size_t i = 0; i < m; i ++) {
+			__m128i xa0 = _mm_loadu_si128(dp + (i << 1) + 0);
+			__m128i xa1 = _mm_loadu_si128(dp + (i << 1) + 1);
+			sse2_iNTT16(&xa0, &xa1, i + m);
+			_mm_storeu_si128(dp + (i << 1) + 0, xa0);
+			_mm_storeu_si128(dp + (i << 1) + 1, xa1);
+		}
+		size_t t = 2;
+		for (unsigned lm = 4; lm < logn; lm ++) {
+			size_t hm = (size_t)1 << (logn - 1 - lm);
+			size_t dt = t << 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < hm; i ++) {
+				__m128i xs = _mm_set1_epi16(mq_iGM[i + hm]);
+				for (size_t j = 0; j < t; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + t;
+					__m128i x1, x2;
+					x1 = _mm_loadu_si128(dp + j1);
+					x2 = _mm_loadu_si128(dp + j2);
+					_mm_storeu_si128(dp + j1,
+						mq_half_x8(
+							mq_add_x8(x1, x2)));
+					_mm_storeu_si128(dp + j2,
+						mq_mmul_x8(xs,
+							mq_sub_x8(x1, x2)));
+				}
+				j0 += dt;
+			}
+			t = dt;
+		}
+	} else {
+		size_t t = 1;
+		for (unsigned lm = 0; lm < logn; lm ++) {
+			size_t hm = (size_t)1 << (logn - 1 - lm);
+			size_t dt = t << 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < hm; i ++) {
+				uint32_t s = mq_iGM[i + hm];
+				for (size_t j = 0; j < t; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + t;
+					uint32_t x1 = d[j1];
+					uint32_t x2 = d[j2];
+					d[j1] = mq_half(mq_add(x1, x2));
+					d[j2] = mq_mmul(mq_sub(x1, x2), s);
+				}
+				j0 += dt;
+			}
+			t = dt;
+		}
+	}
+}
+
+#elif FNDSA_NEON
+
+TARGET_NEON
+static inline void
+neon_iNTT16(int16x8_t *a0, int16x8_t *a1, size_t k)
+{
+	int16x8_t xa0, xa1, xt1, xt2, xt3, xt4, xig0, xig1, xig2, xig3;
+	uint16_t ig1_0, ig1_1;
+
+	xa0 = *a0;
+	xa1 = *a1;
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+	xt3 = vuzp1q_s16(xa0, xa1);
+	xt4 = vuzp2q_s16(xa0, xa1);
+	xt1 = mq_add_x8(xt3, xt4);
+	xt2 = mq_sub_x8(xt3, xt4);
+	xig3 = vld1q_s16((int16_t *)(mq_iGM + (k << 3)));
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig3);
+
+	/* xa0:  0  2  4  6  8 10 12 14 */
+	/* xa1:  1  3  5  7  9 11 13 15 */
+	xt3 = vtrn1q_s16(xa0, xa1);
+	xt4 = vtrn2q_s16(xa0, xa1);
+	xt1 = mq_add_x8(xt3, xt4);
+	xt2 = mq_sub_x8(xt3, xt4);
+	xig2 = vreinterpretq_s16_u64(
+		vdupq_n_u64(*(uint64_t *)(mq_iGM + (k << 2))));
+	xig2 = vzip1q_s16(xig2, xig2);
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig2);
+
+	/* xa0:  0  1  4  5  8  9 12 13 */
+	/* xa1:  2  3  6  7 10 11 14 15 */
+	xt3 = vreinterpretq_s16_s32(vtrn1q_s32(
+		vreinterpretq_s32_s16(xa0), vreinterpretq_s32_s16(xa1)));
+	xt4 = vreinterpretq_s16_s32(vtrn2q_s32(
+		vreinterpretq_s32_s16(xa0), vreinterpretq_s32_s16(xa1)));
+	xt1 = mq_add_x8(xt3, xt4);
+	xt2 = mq_sub_x8(xt3, xt4);
+	ig1_0 = mq_iGM[(k << 1) + 0];
+	ig1_1 = mq_iGM[(k << 1) + 1];
+	xig1 = vcombine_s16(vdup_n_s16(ig1_0), vdup_n_s16(ig1_1));
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, xig1);
+
+	/* xa0:  0  1  2  3  8  9 10 11 */
+	/* xa1:  4  5  6  7 12 13 14 15 */
+	xt3 = vreinterpretq_s16_s64(vzip1q_s64(
+		vreinterpretq_s64_s16(xa0), vreinterpretq_s64_s16(xa1)));
+	xt4 = vreinterpretq_s16_s64(vzip2q_s64(
+		vreinterpretq_s64_s16(xa0), vreinterpretq_s64_s16(xa1)));
+	xt1 = mq_add_x8(xt3, xt4);
+	xt2 = mq_sub_x8(xt3, xt4);
+	xa0 = mq_half_x8(xt1);
+	xa1 = mq_mmul_x8(xt2, vdupq_n_s16(mq_iGM[k]));
+
+	/* xa0:  0  1  2  3  4  5  6  7 */
+	/* xa1:  8  9 10 11 12 13 14 15 */
+	*a0 = xa0;
+	*a1 = xa1;
+}
+
+/* see inner.h */
+TARGET_NEON
+void
+mqpoly_ntt_to_int(unsigned logn, uint16_t *d)
+{
+	if (logn >= 4) {
+		size_t n = (size_t)1 << logn;
+		size_t m = n >> 4;
+		for (size_t i = 0; i < m; i ++) {
+			int16x8_t xa0 = vld1q_s16((int16_t *)d + (i << 4) + 0);
+			int16x8_t xa1 = vld1q_s16((int16_t *)d + (i << 4) + 8);
+			neon_iNTT16(&xa0, &xa1, i + m);
+			vst1q_s16((int16_t *)d + (i << 4) + 0, xa0);
+			vst1q_s16((int16_t *)d + (i << 4) + 8, xa1);
+		}
+		size_t t = 2;
+		for (unsigned lm = 4; lm < logn; lm ++) {
+			size_t hm = (size_t)1 << (logn - 1 - lm);
+			size_t dt = t << 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < hm; i ++) {
+				int16x8_t xs = vdupq_n_s16(mq_iGM[i + hm]);
+				for (size_t j = 0; j < t; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + t;
+					int16x8_t x1 = vld1q_s16(
+						(int16_t *)d + (j1 << 3));
+					int16x8_t x2 = vld1q_s16(
+						(int16_t *)d + (j2 << 3));
+					vst1q_s16((int16_t *)d + (j1 << 3),
+						mq_half_x8(
+							mq_add_x8(x1, x2)));
+					vst1q_s16((int16_t *)d + (j2 << 3),
+						mq_mmul_x8(xs,
+							mq_sub_x8(x1, x2)));
+				}
+				j0 += dt;
+			}
+			t = dt;
+		}
+	} else {
+		size_t t = 1;
+		for (unsigned lm = 0; lm < logn; lm ++) {
+			size_t hm = (size_t)1 << (logn - 1 - lm);
+			size_t dt = t << 1;
+			size_t j0 = 0;
+			for (size_t i = 0; i < hm; i ++) {
+				uint32_t s = mq_iGM[i + hm];
+				for (size_t j = 0; j < t; j ++) {
+					size_t j1 = j0 + j;
+					size_t j2 = j1 + t;
+					uint32_t x1 = d[j1];
+					uint32_t x2 = d[j2];
+					d[j1] = mq_half(mq_add(x1, x2));
+					d[j2] = mq_mmul(mq_sub(x1, x2), s);
+				}
+				j0 += dt;
+			}
+			t = dt;
+		}
+	}
+}
+
+#else
+
 /* see inner.h */
 void
 mqpoly_ntt_to_int(unsigned logn, uint16_t *d)
@@ -682,6 +1585,9 @@ mqpoly_ntt_to_int(unsigned logn, uint16_t *d)
 		t = dt;
 	}
 }
+
+#endif
+
 #endif
 
 #if FNDSA_AVX2
@@ -840,15 +1746,112 @@ avx2_mqpoly_ntt_to_int(unsigned logn, uint16_t *d)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_mul_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xR2 = _mm_set1_epi16(R2);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xa = _mm_loadu_si128((__m128i *)(a + i));
+			__m128i xb = _mm_loadu_si128((__m128i *)(b + i));
+			__m128i xc = mq_mmul_x8(mq_mmul_x8(xa, xb), xR2);
+			_mm_storeu_si128((__m128i *)(a + i), xc);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xR2 = vdupq_n_s16(R2);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xa = vld1q_s16((int16_t *)(a + i));
+			int16x8_t xb = vld1q_s16((int16_t *)(b + i));
+			int16x8_t xc = mq_mmul_x8(mq_mmul_x8(xa, xb), xR2);
+			vst1q_s16((int16_t *)(a + i), xc);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		a[i] = (uint16_t)mq_mmul(mq_mmul(a[i], b[i]), R2);
 	}
 }
 #endif
+
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_muladj_x2_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
+{
+	// TODO: Arm Cortex M4 optimization
+	size_t n = (size_t)1 << logn;
+	size_t hn = n >> 1;
+#if FNDSA_SSE2
+	if (logn >= 4) {
+		__m128i xR2 = _mm_set1_epi16(R2);
+		for (size_t i = 0; i < hn; i += 8) {
+			__m128i xa0 = _mm_loadu_si128((__m128i *)(a + i));
+			__m128i xa1 = _mm_loadu_si128(
+				(__m128i *)(a + n - 8 - i));
+			__m128i xb0 = _mm_loadu_si128((__m128i *)(b + i));
+			__m128i xb1 = _mm_loadu_si128(
+				(__m128i *)(b + n - 8 - i));
+			xa1 = _mm_or_si128(
+				_mm_srli_epi32(xa1, 16),
+				_mm_slli_epi32(xa1, 16));
+			xa1 = _mm_shuffle_epi32(xa1, 0x1B);
+			xb1 = _mm_or_si128(
+				_mm_srli_epi32(xb1, 16),
+				_mm_slli_epi32(xb1, 16));
+			xb1 = _mm_shuffle_epi32(xb1, 0x1B);
+			__m128i xc = mq_mmul_x8(mq_add_x8(
+				mq_mmul_x8(xa0, xa1),
+				mq_mmul_x8(xb0, xb1)), xR2);
+			_mm_storeu_si128((__m128i *)(a + i), xc);
+			xc = _mm_or_si128(
+				_mm_srli_epi32(xc, 16),
+				_mm_slli_epi32(xc, 16));
+			xc = _mm_shuffle_epi32(xc, 0x1B);
+			_mm_storeu_si128((__m128i *)(a + n - 8 - i), xc);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 4) {
+		int16x8_t xR2 = vdupq_n_s16(R2);
+		for (size_t i = 0; i < hn; i += 8) {
+			int16x8_t xa0 = vld1q_s16((int16_t *)(a + i));
+			int16x8_t xa1 = vld1q_s16(
+				(int16_t *)(a + n - 8 - i));
+			int16x8_t xb0 = vld1q_s16((int16_t *)(b + i));
+			int16x8_t xb1 = vld1q_s16(
+				(int16_t *)(b + n - 8 - i));
+			xa1 = vrev64q_s16(xa1);
+			xb1 = vrev64q_s16(xb1);
+			xa1 = vextq_s16(xa1, xa1, 4);
+			xb1 = vextq_s16(xb1, xb1, 4);
+			int16x8_t xc = mq_mmul_x8(mq_add_x8(
+				mq_mmul_x8(xa0, xa1),
+				mq_mmul_x8(xb0, xb1)), xR2);
+			vst1q_s16((int16_t *)(a + i), xc);
+			xc = vrev64q_s16(xc);
+			xc = vextq_s16(xc, xc, 4);
+			vst1q_s16((int16_t *)(a + n - 8 - i), xc);
+		}
+		return;
+	}
+#endif
+	for (size_t i = 0; i < hn; i ++) {
+		a[i] = (uint16_t)mq_mmul(mq_add(
+			mq_mmul(a[i], a[n - 1 - i]),
+			mq_mmul(b[i], b[n - 1 - i])), R2);
+	}
+	for (size_t i = hn; i < n; i ++) {
+		a[i] = a[n - 1 - i];
+	}
+}
 
 #if FNDSA_AVX2
 TARGET_AVX2
@@ -875,51 +1878,225 @@ avx2_mqpoly_mul_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
 #endif
 
 /* see inner.h */
+TARGET_SSE2
 int
-mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
+mqpoly_inv_ntt(unsigned logn, uint16_t *a, uint16_t *tmp)
 {
 	size_t n = (size_t)1 << logn;
-	uint32_t r = 0xFFFFFFFF;
-	for (size_t i = 0; i < n; i ++) {
-		uint32_t x = b[i];
-#if FNDSA_ASM_CORTEXM4
-		/* In a relaxed representation, we want to detect both
-		   x = 0 and x = q. */
-		r &= -x;
-#endif
-		r &= x - Q;
-		a[i] = (uint16_t)mq_div(a[i], x);
+
+	/* Inversion uses Montgomery's trick: given x and y, we have:
+	     1/x = y*(1/(x*y))
+	     1/y = x*(1/(x*y))
+	   We replace n inversions with a single inversion, and 3*(n - 1)
+	   multiplications.
+
+	   Code uses Montgomery multiplications, which _assumes_ that the
+	   values are in Montgomery representation, which is not the case;
+	   a corrective factor is applied in mq_div(), which, in Montgomery
+	   representation, should be mq_div(R2, ax): if ax = z*R, i.e. the
+	   Montgomery representation of some z, then the normal inversion
+	   should return R/z = R^2/ax. But since everything is actually
+	   in normal representation, then we need to apply a 1/R^2 factor,
+	   which is done by using 1 instead of R2 as first parameter to
+	   mq_div(). */
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i ax = _mm_loadu_si128((__m128i *)a);
+		_mm_storeu_si128((__m128i *)tmp, ax);
+		for (size_t i = 8; i < n; i += 8) {
+			ax = mq_mmul_x8(ax,
+				_mm_loadu_si128((__m128i *)(a + i)));
+			_mm_storeu_si128((__m128i *)(tmp + i), ax);
+		}
+		ax = mq_div_x8(_mm_set1_epi16(1), ax);
+		__m128i xr = _mm_sub_epi16(ax, _mm_set1_epi16(Q));
+		for (size_t i = n - 8; i > 0; i -= 8) {
+			__m128i cx = mq_mmul_x8(ax,
+				_mm_loadu_si128((__m128i *)(tmp + i - 8)));
+			ax = mq_mmul_x8(ax,
+				_mm_loadu_si128((__m128i *)(a + i)));
+			_mm_storeu_si128((__m128i *)(a + i), cx);
+		}
+		_mm_storeu_si128((__m128i *)a, ax);
+		return (_mm_movemask_epi8(xr) & 0xAAAA) == 0xAAAA;
 	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t ax = vld1q_s16((int16_t *)a);
+		vst1q_s16((int16_t *)tmp, ax);
+		for (size_t i = 8; i < n; i += 8) {
+			ax = mq_mmul_x8(ax,
+				vld1q_s16((int16_t *)(a + i)));
+			vst1q_s16((int16_t *)(tmp + i), ax);
+		}
+		ax = mq_div_x8(vdupq_n_s16(1), ax);
+		int16x8_t r1 = vceqq_s16(ax, vdupq_n_s16(Q));
+		for (size_t i = n - 8; i > 0; i -= 8) {
+			int16x8_t cx = mq_mmul_x8(ax,
+				vld1q_s16((int16_t *)(tmp + i - 8)));
+			ax = mq_mmul_x8(ax,
+				vld1q_s16((int16_t *)(a + i)));
+			vst1q_s16((int16_t *)(a + i), cx);
+		}
+		vst1q_s16((int16_t *)a, ax);
+		uint8x16_t r2 = vreinterpretq_u8_s16(r1);
+		uint8x8_t r3 = vget_low_u8(vzip2q_u8(r2, r2));
+		return vget_lane_u64(vreinterpret_u64_u8(r3), 0) == 0;
+	}
+#endif
+	uint32_t ax = a[0];
+	tmp[0] = (uint16_t)ax;
+	for (size_t i = 1; i < n; i ++) {
+		ax = mq_mmul(ax, a[i]);
+		tmp[i] = (uint16_t)ax;
+	}
+	ax = mq_div(1, ax);
+	uint32_t r = ax - Q;
+#if FNDSA_ASM_CORTEXM4
+	r &= -ax;
+#endif
+	for (size_t i = n - 1; i > 0; i --) {
+		uint32_t cx = mq_mmul(ax, tmp[i - 1]);
+		ax = mq_mmul(ax, a[i]);
+		a[i] = (uint16_t)cx;
+	}
+	a[0] = (uint16_t)ax;
+	return (r >> 16) != 0;
+}
+
+/* see inner.h */
+TARGET_SSE2
+int
+mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b, uint16_t *tmp)
+{
+	/* See mqpoly_inv_ntt() for details on the algorithm. */
+	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xR2 = _mm_set1_epi16(R2);
+		__m128i bx = _mm_loadu_si128((__m128i *)b);
+		_mm_storeu_si128((__m128i *)tmp, bx);
+		for (size_t i = 8; i < n; i += 8) {
+			bx = mq_mmul_x8(bx,
+				_mm_loadu_si128((__m128i *)(b + i)));
+			_mm_storeu_si128((__m128i *)(tmp + i), bx);
+		}
+		bx = mq_div_x8(_mm_set1_epi16(1), bx);
+		__m128i xr = _mm_sub_epi16(bx, _mm_set1_epi16(Q));
+		for (size_t i = n - 8; i > 0; i -= 8) {
+			__m128i cx = mq_mmul_x8(bx,
+				_mm_loadu_si128((__m128i *)(tmp + i - 8)));
+			bx = mq_mmul_x8(bx,
+				_mm_loadu_si128((__m128i *)(b + i)));
+			__m128i ax = _mm_loadu_si128((__m128i *)(a + i));
+			cx = mq_mmul_x8(cx, mq_mmul_x8(ax, xR2));
+			_mm_storeu_si128((__m128i *)(a + i), cx);
+		}
+		__m128i ax = _mm_loadu_si128((__m128i *)a);
+		ax = mq_mmul_x8(bx, mq_mmul_x8(ax, xR2));
+		_mm_storeu_si128((__m128i *)a, ax);
+		return (_mm_movemask_epi8(xr) & 0xAAAA) == 0xAAAA;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xR2 = vdupq_n_s16(R2);
+		int16x8_t bx = vld1q_s16((int16_t *)b);
+		vst1q_s16((int16_t *)tmp, bx);
+		for (size_t i = 8; i < n; i += 8) {
+			bx = mq_mmul_x8(bx,
+				vld1q_s16((int16_t *)(b + i)));
+			vst1q_s16((int16_t *)(tmp + i), bx);
+		}
+		bx = mq_div_x8(vdupq_n_s16(1), bx);
+		int16x8_t r1 = vceqq_s16(bx, vdupq_n_s16(Q));
+		for (size_t i = n - 8; i > 0; i -= 8) {
+			int16x8_t cx = mq_mmul_x8(bx,
+				vld1q_s16((int16_t *)(tmp + i - 8)));
+			bx = mq_mmul_x8(bx,
+				vld1q_s16((int16_t *)(b + i)));
+			cx = mq_mmul_x8(cx,
+				mq_mmul_x8(vld1q_s16((int16_t *)(a + i)), xR2));
+			vst1q_s16((int16_t *)(a + i), cx);
+		}
+		bx = mq_mmul_x8(bx, mq_mmul_x8(vld1q_s16((int16_t *)a), xR2));
+		vst1q_s16((int16_t *)a, bx);
+		uint8x16_t r2 = vreinterpretq_u8_s16(r1);
+		uint8x8_t r3 = vget_low_u8(vzip2q_u8(r2, r2));
+		return vget_lane_u64(vreinterpret_u64_u8(r3), 0) == 0;
+	}
+#endif
+	uint32_t bx = b[0];
+	tmp[0] = (uint16_t)bx;
+	for (size_t i = 1; i < n; i ++) {
+		bx = mq_mmul(bx, b[i]);
+		tmp[i] = (uint16_t)bx;
+	}
+	bx = mq_div(1, bx);
+	uint32_t r = bx - Q;
+#if FNDSA_ASM_CORTEXM4
+	r &= -bx;
+#endif
+	for (size_t i = n - 1; i > 0; i --) {
+		uint32_t cx = mq_mmul(bx, tmp[i - 1]);
+		bx = mq_mmul(bx, b[i]);
+		a[i] = (uint16_t)mq_mmul(mq_mmul(a[i], cx), R2);
+	}
+	a[0] = (uint16_t)mq_mmul(mq_mmul(a[0], bx), R2);
 	return (r >> 16) != 0;
 }
 
 #if FNDSA_AVX2
 TARGET_AVX2
 int
-avx2_mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
+avx2_mqpoly_div_ntt(unsigned logn,
+	uint16_t *a, const uint16_t *b, uint16_t *tmp)
 {
+	/* See mqpoly_inv_ntt() for details on the algorithm. */
 	if (logn >= 4) {
+		size_t hdn = (size_t)1 << (logn - 4);
 		__m256i *ap = (__m256i *)a;
 		const __m256i *bp = (const __m256i *)b;
-		__m256i qq = _mm256_set1_epi16(Q);
-		__m256i ov = _mm256_set1_epi16(-1);
-		for (size_t i = 0; i < (1u << (logn - 4)); i ++) {
-			__m256i ya = _mm256_loadu_si256(ap + i);
-			__m256i yb = _mm256_loadu_si256(bp + i);
-			ya = mq_div_x16(ya, yb);
-			_mm256_storeu_si256(ap + i, ya);
-			ov = _mm256_and_si256(ov, _mm256_sub_epi16(yb, qq));
+		__m256i *tp = (__m256i *)tmp;
+		__m256i bx = _mm256_loadu_si256(bp);
+		_mm256_storeu_si256(tp, bx);
+		for (size_t i = 1; i < hdn; i ++) {
+			__m256i dx = _mm256_loadu_si256(bp + i);
+			bx = mq_mmul_x16(bx, dx);
+			_mm256_storeu_si256(tp + i, bx);
 		}
+		bx = mq_div_x16(_mm256_set1_epi16(1), bx);
+		__m256i ov = _mm256_sub_epi16(bx, _mm256_set1_epi16(Q));
+		__m256i yR2 = _mm256_set1_epi16(R2);
 		uint32_t r = (uint32_t)_mm256_movemask_epi8(ov);
+		for (size_t i = hdn - 1; i > 0; i --) {
+			__m256i cx = _mm256_loadu_si256(tp + (i - 1));
+			cx = mq_mmul_x16(bx, cx);
+			bx = mq_mmul_x16(bx, _mm256_loadu_si256(bp + i));
+			__m256i ax = _mm256_loadu_si256(ap + i);
+			ax = mq_mmul_x16(mq_mmul_x16(ax, yR2), cx);
+			_mm256_storeu_si256(ap + i, ax);
+		}
+		__m256i ax = _mm256_loadu_si256(ap);
+		ax = mq_mmul_x16(mq_mmul_x16(ax, yR2), bx);
+		_mm256_storeu_si256(ap, ax);
 		return (r & 0xAAAAAAAA) == 0xAAAAAAAA;
 	} else {
 		size_t n = (size_t)1 << logn;
-		uint32_t r = 0xFFFFFFFF;
-		for (size_t i = 0; i < n; i ++) {
-			uint32_t x = b[i];
-			r &= x - Q;
-			a[i] = (uint16_t)mq_div(a[i], x);
+
+		uint32_t bx = b[0];
+		tmp[0] = (uint16_t)bx;
+		for (size_t i = 1; i < n; i ++) {
+			bx = mq_mmul(bx, b[i]);
+			tmp[i] = (uint16_t)bx;
 		}
+		bx = mq_div(1, bx);
+		uint32_t r = bx - Q;
+		for (size_t i = n - 1; i > 0; i --) {
+			uint32_t cx = mq_mmul(bx, tmp[i - 1]);
+			bx = mq_mmul(bx, b[i]);
+			a[i] = (uint16_t)mq_mmul(mq_mmul(a[i], cx), R2);
+		}
+		a[0] = (uint16_t)mq_mmul(mq_mmul(a[0], bx), R2);
 		return (r >> 16) != 0;
 	}
 }
@@ -927,22 +2104,108 @@ avx2_mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_sub(unsigned logn, uint16_t *a, const uint16_t *b)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xa = _mm_loadu_si128((__m128i *)(a + i));
+			__m128i xb = _mm_loadu_si128((__m128i *)(b + i));
+			__m128i xc = mq_sub_x8(xa, xb);
+			_mm_storeu_si128((__m128i *)(a + i), xc);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xa = vld1q_s16((int16_t *)(a + i));
+			int16x8_t xb = vld1q_s16((int16_t *)(b + i));
+			int16x8_t xc = mq_sub_x8(xa, xb);
+			vst1q_s16((int16_t *)(a + i), xc);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		a[i] = (uint16_t)mq_sub(a[i], b[i]);
 	}
 }
 #endif
 
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_neg(unsigned logn, uint16_t *a)
+{
+	size_t n = (size_t)1 << logn;
+#if FNDSA_ASM_CORTEXM4
+	for (size_t i = 0; i < n; i ++) {
+		a[i] = Q - a[i];
+	}
+#else
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xq = _mm_set1_epi16(Q);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i x = _mm_loadu_si128((__m128i *)(a + i));
+			x = _mm_sub_epi16(xq, x);
+			x = _mm_or_si128(x, _mm_and_si128(xq,
+				_mm_cmpeq_epi16(x, _mm_setzero_si128())));
+			_mm_storeu_si128((__m128i *)(a + i), x);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xq = vdupq_n_s16(Q);
+		int16x8_t xz = vdupq_n_s16(0);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t x = vld1q_s16((int16_t *)(a + i));
+			x = vsubq_s16(xq, x);
+			x = vorrq_s16(x, vandq_s16(xq, vceqq_s16(x, xz)));
+			vst1q_s16((int16_t *)(a + i), x);
+		}
+		return;
+	}
+#endif
+	for (size_t i = 0; i < n; i ++) {
+		a[i] = (uint16_t)mq_sub(Q, a[i]);
+	}
+#endif
+}
+
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 void
 mqpoly_add(unsigned logn, uint16_t *a, const uint16_t *b)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xa = _mm_loadu_si128((__m128i *)(a + i));
+			__m128i xb = _mm_loadu_si128((__m128i *)(b + i));
+			__m128i xc = mq_add_x8(xa, xb);
+			_mm_storeu_si128((__m128i *)(a + i), xc);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xa = vld1q_s16((int16_t *)(a + i));
+			int16x8_t xb = vld1q_s16((int16_t *)(b + i));
+			int16x8_t xc = mq_add_x8(xa, xb);
+			vst1q_s16((int16_t *)(a + i), xc);
+		}
+		return;
+	}
+#endif
 	for (size_t i = 0; i < n; i ++) {
 		a[i] = (uint16_t)mq_add(a[i], b[i]);
 	}
@@ -989,6 +2252,67 @@ mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp)
 	return (r >> 16) != 0;
 }
 
+/* see inner.h */
+TARGET_SSE2
+void
+mqpoly_muladj_add_muladj(unsigned logn,
+	uint16_t *a, const uint16_t *b, const uint16_t *c, const uint16_t *d)
+{
+	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xR2 = _mm_set1_epi16(R2);
+		for (size_t i = 0; i < n; i += 8) {
+			__m128i xa = _mm_loadu_si128((__m128i *)(a + i));
+			__m128i xb = _mm_loadu_si128(
+				(__m128i *)(b + n - 8 - i));
+			xb = _mm_or_si128(
+				_mm_srli_epi32(xb, 16),
+				_mm_slli_epi32(xb, 16));
+			xb = _mm_shuffle_epi32(xb, 0x1B);
+			__m128i xc = _mm_loadu_si128((__m128i *)(c + i));
+			__m128i xd = _mm_loadu_si128(
+				(__m128i *)(d + n - 8 - i));
+			xd = _mm_or_si128(
+				_mm_srli_epi32(xd, 16),
+				_mm_slli_epi32(xd, 16));
+			xd = _mm_shuffle_epi32(xd, 0x1B);
+			__m128i xe = mq_mmul_x8(mq_add_x8(
+				mq_mmul_x8(xa, xb),
+				mq_mmul_x8(xc, xd)), xR2);
+			_mm_storeu_si128((__m128i *)(a + i), xe);
+		}
+		return;
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xR2 = vdupq_n_s16(R2);
+		for (size_t i = 0; i < n; i += 8) {
+			int16x8_t xa = vld1q_s16((int16_t *)(a + i));
+			int16x8_t xb = vld1q_s16(
+				(int16_t *)(b + n - 8 - i));
+			xb = vrev64q_s16(xb);
+			xb = vextq_s16(xb, xb, 4);
+			int16x8_t xc = vld1q_s16((int16_t *)(c + i));
+			int16x8_t xd = vld1q_s16(
+				(int16_t *)(d + n - 8 - i));
+			xd = vrev64q_s16(xd);
+			xd = vextq_s16(xd, xd, 4);
+			int16x8_t xe = mq_mmul_x8(mq_add_x8(
+				mq_mmul_x8(xa, xb),
+				mq_mmul_x8(xc, xd)), xR2);
+			vst1q_s16((int16_t *)(a + i), xe);
+		}
+		return;
+	}
+#endif
+	for (size_t i = 0; i < n; i ++) {
+		uint32_t x = mq_mmul(a[i], b[n - 1 - i]);
+		uint32_t y = mq_mmul(c[i], d[n - 1 - i]);
+		a[i] = mq_mmul(mq_add(x, y), R2);
+	}
+}
+
 #if FNDSA_AVX2
 TARGET_AVX2
 int
@@ -1017,50 +2341,85 @@ avx2_mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp)
 }
 #endif
 
-#if 0 /* obsolete */
-/* see inner.h */
-void
-mqpoly_div_small(unsigned logn, const int8_t *g, const int8_t *f,
-        uint16_t *h, uint16_t *tmp)
-{
-	mqpoly_small_to_int(logn, f, tmp);
-	mqpoly_small_to_int(logn, g, h);
-	mqpoly_int_to_ntt(logn, tmp);
-	mqpoly_int_to_ntt(logn, h);
-	mqpoly_div_ntt(logn, h, tmp);
-	mqpoly_ntt_to_int(logn, h);
-	mqpoly_int_to_ext(logn, h);
-}
-
-#if FNDSA_AVX2
-TARGET_AVX2
-void
-avx2_mqpoly_div_small(unsigned logn, const int8_t *g, const int8_t *f,
-        uint16_t *h, uint16_t *tmp)
-{
-	avx2_mqpoly_small_to_int(logn, f, tmp);
-	avx2_mqpoly_small_to_int(logn, g, h);
-	avx2_mqpoly_int_to_ntt(logn, tmp);
-	avx2_mqpoly_int_to_ntt(logn, h);
-	avx2_mqpoly_div_ntt(logn, h, tmp);
-	avx2_mqpoly_ntt_to_int(logn, h);
-	avx2_mqpoly_int_to_ext(logn, h);
-}
-#endif
-#endif
-
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 uint32_t
 mqpoly_sqnorm_binf_int(unsigned logn, const uint16_t *a)
 {
 	/*
-	 * The normalized values are at most (q-1)/2 in absolute value,
-	 * thus the squares are at most 37748736. If the sum overflows,
-	 * then it must at some point be in [2^31,2^32-1], i.e. with
-	 * the highest bit set.
+	 * If all values are at most B_INF in absolute value, then the
+	 * maximum possible sum is 1024*B_INF^2, which is lower than
+	 * 2^30; thus, the addition cannot overflow (i.e. if it does,
+	 # then the B_INF check will saturate the output anyway).
 	 */
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i xq = _mm_set1_epi16(Q);
+		__m128i xh = _mm_set1_epi16((Q - 1) >> 1);
+		__m128i bbp = _mm_set1_epi16(B_INF);
+		__m128i bbm = _mm_set1_epi16(-B_INF);
+		const __m128i *ap = (const __m128i *)a;
+		__m128i xs = _mm_setzero_si128();
+		__m128i xbb = _mm_setzero_si128();
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			__m128i x = _mm_loadu_si128(ap + i);
+			/* Normalize to signed. */
+			x = _mm_sub_epi16(x,
+				_mm_and_si128(xq, _mm_cmpgt_epi16(x, xh)));
+			/* Check infinity norm. */
+			xbb = _mm_or_si128(xbb, _mm_cmpgt_epi16(x, bbp));
+			xbb = _mm_or_si128(xbb, _mm_cmplt_epi16(x, bbm));
+			/* Accumulate squared norm. */
+			__m128i xlo = _mm_mullo_epi16(x, x);
+			__m128i xhi = _mm_mulhi_epi16(x, x);
+			__m128i x0 = _mm_unpacklo_epi16(xlo, xhi);
+			__m128i x1 = _mm_unpackhi_epi16(xlo, xhi);
+			xs = _mm_add_epi32(xs, _mm_add_epi32(x0, x1));
+		}
+		xs = _mm_add_epi32(xs, _mm_srli_epi64(xs, 32));
+		xs = _mm_add_epi32(xs, _mm_bsrli_si128(xs, 8));
+		/* Apply infinity norm check. */
+		xbb = _mm_or_si128(xbb, _mm_slli_epi32(xbb, 16));
+		xbb = _mm_or_si128(xbb, _mm_srli_epi32(xbb, 16));
+		xbb = _mm_or_si128(xbb, _mm_srli_epi64(xbb, 32));
+		xbb = _mm_or_si128(xbb, _mm_bsrli_si128(xbb, 8));
+		xs = _mm_or_si128(xs, xbb);
+		return (uint32_t)_mm_cvtsi128_si32(xs);
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t xq = vdupq_n_s16(Q);
+		int16x8_t xh = vdupq_n_s16((Q - 1) >> 1);
+		int16x8_t bbp = vdupq_n_s16(B_INF);
+		int16x8_t bbm = vdupq_n_s16(-B_INF);
+		int32x4_t xs = vdupq_n_s32(0);
+		int16x8_t xbb = vdupq_n_s16(0);
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			int16x8_t x = vld1q_s16((int16_t *)a + (i << 3));
+			/* Normalize to signed. */
+			x = vsubq_s16(x, vandq_s16(xq, vcgtq_s16(x, xh)));
+			/* Check infinity norm. */
+			xbb = vorrq_s16(xbb, vcgtq_s16(x, bbp));
+			xbb = vorrq_s16(xbb, vcltq_s16(x, bbm));
+			/* Accumulate squared norm. */
+			int16x4_t xlo = vget_low_s16(x);
+			int16x4_t xhi = vget_high_s16(x);
+			int32x4_t x0 = vmull_s16(xlo, xlo);
+			int32x4_t x1 = vmull_s16(xhi, xhi);
+			xs = vaddq_s32(xs, vaddq_s32(x0, x1));
+		}
+		int32x2_t xsl = vadd_s32(vget_low_s32(xs), vget_high_s32(xs));
+		uint32_t r = vget_lane_s32(xsl, 0) + vget_lane_s32(xsl, 1);
+		/* Apply infinity norm check. */
+		uint32x2_t bbl = vreinterpret_u32_s16(
+			vorr_s16(vget_low_s16(xbb), vget_high_s16(xbb)));
+		uint32_t b = vget_lane_u32(bbl, 0) | vget_lane_u32(bbl, 1);
+		b |= (b << 16) | (b >> 16);
+		return r | b;
+	}
+#endif
 	uint32_t s = 0;
 	uint32_t sat = 0;
 	for (size_t i = 0; i < n; i ++) {
@@ -1077,6 +2436,89 @@ mqpoly_sqnorm_binf_int(unsigned logn, const uint16_t *a)
 }
 #endif
 
+/* see inner.h */
+TARGET_SSE2
+uint32_t
+mqpoly_sqnorm_binf_signed(unsigned logn, const int16_t *a)
+{
+	/*
+	 * If all values are at most B_INF in absolute value, then the
+	 * maximum possible sum is 1024*B_INF^2, which is lower than
+	 * 2^30; thus, the addition cannot overflow (i.e. if it does,
+	 # then the B_INF check will saturate the output anyway).
+	 */
+	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		__m128i bbp = _mm_set1_epi16(B_INF);
+		__m128i bbm = _mm_set1_epi16(-B_INF);
+		const __m128i *ap = (const __m128i *)a;
+		__m128i xs = _mm_setzero_si128();
+		__m128i xbb = _mm_setzero_si128();
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			__m128i x = _mm_loadu_si128(ap + i);
+			/* Check infinity norm. */
+			xbb = _mm_or_si128(xbb, _mm_cmpgt_epi16(x, bbp));
+			xbb = _mm_or_si128(xbb, _mm_cmplt_epi16(x, bbm));
+			/* Accumulate squared norm. */
+			__m128i xlo = _mm_mullo_epi16(x, x);
+			__m128i xhi = _mm_mulhi_epi16(x, x);
+			__m128i x0 = _mm_unpacklo_epi16(xlo, xhi);
+			__m128i x1 = _mm_unpackhi_epi16(xlo, xhi);
+			xs = _mm_add_epi32(xs, _mm_add_epi32(x0, x1));
+		}
+		xs = _mm_add_epi32(xs, _mm_srli_epi64(xs, 32));
+		xs = _mm_add_epi32(xs, _mm_bsrli_si128(xs, 8));
+		/* Apply infinity norm check. */
+		xbb = _mm_or_si128(xbb, _mm_slli_epi32(xbb, 16));
+		xbb = _mm_or_si128(xbb, _mm_srli_epi32(xbb, 16));
+		xbb = _mm_or_si128(xbb, _mm_srli_epi64(xbb, 32));
+		xbb = _mm_or_si128(xbb, _mm_bsrli_si128(xbb, 8));
+		xs = _mm_or_si128(xs, xbb);
+		return (uint32_t)_mm_cvtsi128_si32(xs);
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int16x8_t bbp = vdupq_n_s16(B_INF);
+		int16x8_t bbm = vdupq_n_s16(-B_INF);
+		int32x4_t xs = vdupq_n_s32(0);
+		int16x8_t xbb = vdupq_n_s16(0);
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			int16x8_t x = vld1q_s16((int16_t *)a + (i << 3));
+			/* Check infinity norm. */
+			xbb = vorrq_s16(xbb, vcgtq_s16(x, bbp));
+			xbb = vorrq_s16(xbb, vcltq_s16(x, bbm));
+			/* Accumulate squared norm. */
+			int16x4_t xlo = vget_low_s16(x);
+			int16x4_t xhi = vget_high_s16(x);
+			int32x4_t x0 = vmull_s16(xlo, xlo);
+			int32x4_t x1 = vmull_s16(xhi, xhi);
+			xs = vaddq_s32(xs, vaddq_s32(x0, x1));
+		}
+		int32x2_t xsl = vadd_s32(vget_low_s32(xs), vget_high_s32(xs));
+		uint32_t r = vget_lane_s32(xsl, 0) + vget_lane_s32(xsl, 1);
+		/* Apply infinity norm check. */
+		uint32x2_t bbl = vreinterpret_u32_s16(
+			vorr_s16(vget_low_s16(xbb), vget_high_s16(xbb)));
+		uint32_t b = vget_lane_u32(bbl, 0) | vget_lane_u32(bbl, 1);
+		b |= (b << 16) | (b >> 16);
+		return r | b;
+	}
+#endif
+	uint32_t s = 0;
+	uint32_t sat = 0;
+	for (size_t i = 0; i < n; i ++) {
+		int32_t y = a[i];
+		s += (uint32_t)(y * y);
+		sat |= s;
+		sat |= (uint32_t)(B_INF - y);
+		sat |= (uint32_t)(B_INF + y);
+	}
+	s |= -(sat >> 31);
+	return s;
+}
+
+#if 0 /* obsolete */
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
 uint32_t
@@ -1102,6 +2544,7 @@ mqpoly_sqnorm_int_to_signed(unsigned logn, uint16_t *a)
 	s |= -(sat >> 31);
 	return s;
 }
+#endif
 #endif
 
 #if FNDSA_AVX2
@@ -1190,10 +2633,42 @@ avx2_mqpoly_sqnorm_binf_ext(unsigned logn, const uint16_t *a)
 
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
+TARGET_SSE2
 uint32_t
 mqpoly_sqnorm_signed(unsigned logn, const uint16_t *a)
 {
 	size_t n = (size_t)1 << logn;
+#if FNDSA_SSE2
+	if (logn >= 3) {
+		const __m128i *ap = (const __m128i *)a;
+		__m128i ys = _mm_setzero_si128();
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			__m128i y = _mm_loadu_si128(ap + i);
+			__m128i ylo = _mm_mullo_epi16(y, y);
+			__m128i yhi = _mm_mulhi_epi16(y, y);
+			__m128i y0 = _mm_unpacklo_epi16(ylo, yhi);
+			__m128i y1 = _mm_unpackhi_epi16(ylo, yhi);
+			ys = _mm_add_epi32(ys, _mm_add_epi32(y0, y1));
+		}
+		ys = _mm_add_epi32(ys, _mm_srli_epi64(ys, 32));
+		ys = _mm_add_epi32(ys, _mm_bsrli_si128(ys, 8));
+		return (uint32_t)_mm_cvtsi128_si32(ys);
+	}
+#elif FNDSA_NEON
+	if (logn >= 3) {
+		int32x4_t ys = vdupq_n_s32(0);
+		for (size_t i = 0; i < (1u << (logn - 3)); i ++) {
+			int16x8_t y = vld1q_s16((int16_t *)a + (i << 3));
+			int16x4_t ylo = vget_low_s16(y);
+			int16x4_t yhi = vget_high_s16(y);
+			int32x4_t y0 = vmull_s16(ylo, ylo);
+			int32x4_t y1 = vmull_s16(yhi, yhi);
+			ys = vaddq_s32(ys, vaddq_s32(y0, y1));
+		}
+		int32x2_t ysl = vadd_s32(vget_low_s32(ys), vget_high_s32(ys));
+		return vget_lane_s32(ysl, 0) + vget_lane_s32(ysl, 1);
+	}
+#endif
 	uint32_t s = 0;
 	for (size_t i = 0; i < n; i ++) {
 		int32_t y = *(int16_t *)&a[i];

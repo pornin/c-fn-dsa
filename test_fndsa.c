@@ -4866,7 +4866,7 @@ check_keypair(unsigned logn, const uint8_t *skey, const uint8_t *vkey,
 		exit(EXIT_FAILURE);
 	}
 	uint16_t *h = xmalloc(n * sizeof *h);
-	uint16_t *tmp = xmalloc(n * sizeof *tmp);
+	uint16_t *tmp = xmalloc(2 * n * sizeof *tmp);
 	int nbits;
 	if (logn <= 5) {
 		nbits = 8;
@@ -4905,7 +4905,7 @@ check_keypair(unsigned logn, const uint8_t *skey, const uint8_t *vkey,
 	mqpoly_small_to_int(logn, g, h);
 	mqpoly_int_to_ntt(logn, tmp);
 	mqpoly_int_to_ntt(logn, h);
-	if (!mqpoly_div_ntt(logn, h, tmp)) {
+	if (!mqpoly_div_ntt(logn, h, tmp, tmp + n)) {
 		fprintf(stderr, "f is not invertible\n");
 		exit(EXIT_FAILURE);
 	}

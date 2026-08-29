@@ -552,9 +552,10 @@ void mqpoly_mul_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
 
 /* Divide polynomial a by polynomial b (both in ntt representation).
    If b is not invertible, then the corresponding coefficients are set
-   to zero in the output ntt representation.
+   to zero in the output ntt representation. t[] is a temporary area
+   that must be large enough to hold n values.
    Return value is 1 on success (b is invertible), 0 otherwise. */
-int mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
+int mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b, uint16_t *t);
 
 /* Subtract polynomial b from polynomial a (both must be in int
    representation, or both must be in ntt representation). */
@@ -640,7 +641,8 @@ void avx2_mqpoly_int_to_ext(unsigned logn, uint16_t *d);
 void avx2_mqpoly_int_to_ntt(unsigned logn, uint16_t *d);
 void avx2_mqpoly_ntt_to_int(unsigned logn, uint16_t *d);
 void avx2_mqpoly_mul_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
-int avx2_mqpoly_div_ntt(unsigned logn, uint16_t *a, const uint16_t *b);
+int avx2_mqpoly_div_ntt(unsigned logn,
+	uint16_t *a, const uint16_t *b, uint16_t *tmp);
 void avx2_mqpoly_sub(unsigned logn, uint16_t *a, const uint16_t *b);
 int avx2_mqpoly_is_invertible(unsigned logn, const int8_t *f, uint16_t *tmp);
 #if 0 /* obsolete */

@@ -71,7 +71,7 @@ sign_step1(unsigned logn, const uint8_t *sign_key, const uint8_t *mu,
 	mqpoly_small_to_int(logn, f, t1);
 	mqpoly_int_to_ntt(logn, t0);
 	mqpoly_int_to_ntt(logn, t1);
-	if (!mqpoly_div_ntt(logn, t0, t1)) {
+	if (!mqpoly_div_ntt(logn, t0, t1, t0 + n)) {
 		/* f is not invertible; the key is not valid */
 		return 0;
 	}
