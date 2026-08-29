@@ -7,8 +7,6 @@
 #   -DFNDSA_DIV_EMU=1      force integer emulation of divisions (RISC-V only)
 #   -DFNDSA_SQRT_EMU=1     force integer emulation of square roots (RISC-V only)
 #
-#   -DFNDSA_TSC=1          use timestamp counter (for speed_fndsa benchmarks)
-#
 # AVX2 support is compiled on x86 and x86_64 but is gated at runtime
 # with a check that AVX2 is supported by the current CPU (and not
 # disabled by the operating system); if AVX2 cannot be used, then the
@@ -40,21 +38,12 @@
 # validate that all computations are correct) and 'speed_fndsa' (speed
 # benchmarks). The 'speed_fndsa' program uses the platform cycle
 # counter, which _may_ be inaccessible to normal user, unless some
-# specific action is performed. On x86 Linux systems (both 32-bit and
-# 64-bit), access to the cycle counter can be authorized by the root
-# user, by writing to a specific pseudofile in /sys. By adding
-# '-DFNDSA_TSC=1' to the compilation command for speed_fndsa.c, the
-# timestamp counter will be used instead, and that one is typically
-# accessible by default; however, the timestamp counter is not reliable
-# for benchmarks in general, unless CPU frequency opportunistic upward
-# scaling (aka "TurboBoost" in Intel terminology) has been disabled. On
-# aarch64 and riscv64 Linux systems, allowing access to the cycle
-# counter by userland applications is a more involved process which
-# entails loading a custom kernel module; see details on:
-#    https://github.com/pornin/cycle-counter/
-# It has been reported that the "Apple Silicon" CPUs (aarch64 but made
-# by Apple) behave differently, and the custom Linux kernel module above
-# will not work on these machines.
+# specific action is performed (see comments in speed_fndsa.c for details).
+# By invoking speed_fndsa with the '-tsc' parameter, the TSC is used
+# instead, but the reported values are then in nanoseconds, and their
+# interpretation becomes more complicated because the CPU frequency may
+# vary, making the code run faster or slower depending on system load
+# and temperature.
 
 CC = clang
 CFLAGS = -W -Wextra -Wundef -Wshadow -O2
