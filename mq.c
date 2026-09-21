@@ -2518,7 +2518,6 @@ mqpoly_sqnorm_binf_signed(unsigned logn, const int16_t *a)
 	return s;
 }
 
-#if 0 /* obsolete */
 #if !FNDSA_ASM_CORTEXM4
 /* see inner.h */
 uint32_t
@@ -2544,7 +2543,6 @@ mqpoly_sqnorm_int_to_signed(unsigned logn, uint16_t *a)
 	s |= -(sat >> 31);
 	return s;
 }
-#endif
 #endif
 
 #if FNDSA_AVX2
