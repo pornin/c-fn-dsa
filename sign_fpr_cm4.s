@@ -64,7 +64,7 @@ fndsa_fpr_of32:
 	lsls	r0, r2, #21
 
 	bx	lr
-	.size	fndsa_fpr_scaled,.-fndsa_fpr_scaled
+	.size	fndsa_fpr_of32,.-fndsa_fpr_of32
 
 @ =======================================================================
 @ fpr fndsa_fpr_scaled(int64_t i, int sc)
@@ -818,7 +818,7 @@ fndsa_fpr_sqr:
 	@pop	{ r4, r5 }
 	vmov	r4, r5, s0, s1
 	bx	lr
-	.size	fndsa_fpr_mul,.-fndsa_fpr_mul
+	.size	fndsa_fpr_sqr,.-fndsa_fpr_sqr
 
 @ =======================================================================
 @ fpr fndsa_fpr_div(fpr x, fpr y)
